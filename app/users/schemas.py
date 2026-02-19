@@ -51,3 +51,12 @@ class ShopName(str, Enum):
 
 class UserShopsUpdate(BaseModel):
     favorite_shops: List[ShopName]
+
+class ChugumeType(str, Enum):
+    MORI = "모리걸"
+    DEMURE = "드뮤어"
+    GIRLCORE = "걸코어"
+    SPORTY = "스포티 글램"
+
+class ChugumeUpdate(BaseModel):
+    chugume_type: ChugumeType

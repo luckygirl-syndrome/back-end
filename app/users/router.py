@@ -120,3 +120,28 @@ def get_favorite_shops(current_user: models.User = Depends(get_current_user)):
         return {"favorite_shops": []}
         
     return {"favorite_shops": json.loads(current_user.favorite_shops)}
+
+@router.post("/profile/chugume")
+def update_chugume(
+    data: schemas.ChugumeUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # Enum에서 선택된 한글 값을 DB에 저장
+    current_user.chu_gu_me = data.chugume_type.value
+    db.commit()
+    
+    return {
+        "status": "success", 
+        "message": f"추구미가 '{current_user.chu_gu_me}'로 설정되었습니다!"
+    }
+    
+@router.get("/profile/chugume")
+def get_chugume(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # 유저 정보에서 추구미 값을 가져옴 (없으면 None 반환)
+    return {
+        "chugume_type": current_user.chu_gu_me
+    }
