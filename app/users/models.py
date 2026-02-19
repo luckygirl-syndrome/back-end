@@ -11,3 +11,4 @@ class User(Base):
     password = Column(String(100))  # hashed_password 대신 password
     persona_type = Column(TEXT, nullable=True) # persona 대신 persona_type
     profile_img = Column(TEXT, default="0") # profile_image_index 대신 profile_img
+    favorite_shops = Column(TEXT, nullable=True) # ["무신사", "지그재그"] 형태로 저장될 예정

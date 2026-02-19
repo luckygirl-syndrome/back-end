@@ -101,3 +101,22 @@ def update_sbti_complex(
         "status": "success", 
         "persona": data  # SbtiFinalResult 객체를 그대로 반환
     }
+    
+@router.post("/profile/shop")
+def update_favorite_shops(
+    data: schemas.UserShopsUpdate, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    # 리스트를 JSON 문자열로 변환해서 저장
+    current_user.favorite_shops = json.dumps(data.favorite_shops, ensure_ascii=False)
+    db.commit()
+    
+    return {"status": "success", "favorite_shops": data.favorite_shops}
+
+@router.get("/profile/shop")
+def get_favorite_shops(current_user: models.User = Depends(get_current_user)):
+    if not current_user.favorite_shops:
+        return {"favorite_shops": []}
+        
+    return {"favorite_shops": json.loads(current_user.favorite_shops)}

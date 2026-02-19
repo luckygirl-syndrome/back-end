@@ -4,6 +4,10 @@ from typing import Optional, Any, Dict
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 
+from enum import Enum
+from typing import List
+
+
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
@@ -39,3 +43,11 @@ class PersonaRead(BaseModel):
 class ProfileUpdate(BaseModel):
     nickname: Optional[str] = None
     profile_img: Optional[str] = None
+    
+class ShopName(str, Enum):
+    MUSINSA = "무신사"
+    ABLY = "에이블리"
+    ZIGZAG = "지그재그"
+
+class UserShopsUpdate(BaseModel):
+    favorite_shops: List[ShopName]
