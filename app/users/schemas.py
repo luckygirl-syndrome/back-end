@@ -21,18 +21,17 @@ class ProfileRead(BaseModel):
     class Config:
         from_attributes = True
 
-class AxisDetail(BaseModel):
-    result: str
-    count_1: int = 0 
-    count_2: int = 0 
-    confidence: float
+class AxisScore(BaseModel):
+    result: str    # "D" 또는 "N"
+    score: int     # 3개 질문 중 해당 타입이 선택된 개수 (0~3)
 
 class SbtiFinalResult(BaseModel):
-    persona_type: str
-    d_vs_n: AxisDetail
-    s_vs_a: AxisDetail
-    m_vs_t: AxisDetail
-    description: str     
+    persona_type: str  # "DSN"
+    description: str   # "도파민 중독자"
+    # 각 축의 점수만 딱 저장 (9개 질문 결과 요약)
+    d_vs_n: AxisScore
+    s_vs_a: AxisScore
+    m_vs_t: AxisScore 
 
 class PersonaRead(BaseModel):
     persona: Optional[SbtiFinalResult] = None
