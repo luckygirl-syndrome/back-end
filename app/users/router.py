@@ -65,7 +65,7 @@ def get_my_profile(current_user: models.User = Depends(get_current_user)):
     # 1. 기본 정보 세팅
     profile_data = {
         "nickname": current_user.nickname,
-        "profile_img": current_user.profile_img,
+        "profile_img": str(current_user.profile_img) if current_user.profile_img else "1",
         "description": "" # 기본값
     }
     
@@ -73,10 +73,9 @@ def get_my_profile(current_user: models.User = Depends(get_current_user)):
     if current_user.persona_type:
         try:
             persona_json = json.loads(current_user.persona_type)
-            # SbtiFinalResult 구조에 따라 description을 가져옴
             profile_data["description"] = persona_json.get("description", "")
-        except Exception:
-            profile_data["description"] = ""
+        except:
+            pass
             
     return profile_data
 
