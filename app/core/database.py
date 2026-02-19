@@ -19,10 +19,14 @@ print("="*50)
 print(f"DEBUG: 현재 SQLAlchemy에 전달되는 주소 -> [{settings.DATABASE_URL[:30]}...]")
 print("="*50)
 
+# SSL 설정을 추가한 엔진 생성
 engine = create_engine(
     settings.DATABASE_URL,
     pool_pre_ping=True,
-    pool_recycle=3600
+    pool_recycle=3600,
+    connect_args={
+        "ssl": {"ca": "/etc/ssl/certs/ca-certificates.crt"} # 서버(Ubuntu) 환경의 SSL 인증서 경로
+    }
 )
 
 # 2. 세션 설정
