@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.core.database import engine, Base, get_db
 from app.users.router import router as user_router # 유저 라우터 가져오기
 from app.users import models # ✅ 모델을 불러와야 테이블을 만듭니다.
+from app.products import router as products_router
 
 # 서버 시작 시 테이블 생성
 Base.metadata.create_all(bind=engine)
@@ -19,6 +20,7 @@ app = FastAPI(title=settings.PROJECT_NAME)
 
 # ✅ 이 줄이 있어야 스웨거에 '유저 관리' 메뉴가 뜹니다!
 app.include_router(user_router)
+app.include_router(products_router.router)
 
 @app.get("/")
 def root():
