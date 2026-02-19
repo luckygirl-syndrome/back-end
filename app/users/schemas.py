@@ -15,7 +15,7 @@ class UserLogin(BaseModel):
 
 class ProfileRead(BaseModel):
     nickname: str
-    profile_img: Optional[str] = None
+    profile_img: Optional[str] = "0"
     description: Optional[str] = None  # 성향 설명 필드 추가
 
     class Config:
