@@ -133,10 +133,18 @@ def crawl_ably(url):
 # --- 4. Core Parsing & Integration ---
 
 def detect_platform(url):
-    if "a-bly.com" in url: return "ably"
-    elif "musinsa.com" in url: return "musinsa"
-    elif "zigzag.kr" in url: return "zigzag"
-    raise ValueError("지원하지 않는 플랫폼 주소입니다.")
+    url_lower = url.lower() # 대소문자 섞여 있어도 상관없게!
+    
+    if "a-bly" in url_lower or "ably" in url_lower:
+        return "ably"
+    elif "musinsa" in url_lower:
+        return "musinsa"
+    elif "zigzag" in url_lower:
+        return "zigzag"
+    else:
+        # 에러 날 때 어떤 주소가 들어왔는지 터미널에 찍어줘서 확인하기 쉽게!
+        print(f"DEBUG: 인식 실패한 URL -> {url}") 
+        raise ValueError(f"지원하지 않는 플랫폼 주소입니다: {url}")
 
 def extract_features_from_url(url, model_path="./student_distilled_e5_rule"):
     try:
