@@ -6,6 +6,9 @@ from app.core.database import engine, Base, get_db
 from app.users.router import router as user_router # 유저 라우터 가져오기
 from app.users import models # ✅ 모델을 불러와야 테이블을 만듭니다.
 from app.products import router as products_router
+from app.chat import router as chat_router
+from fastapi.middleware.cors import CORSMiddleware
+
 
 # 서버 시작 시 테이블 생성
 Base.metadata.create_all(bind=engine)
@@ -18,9 +21,19 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title=settings.PROJECT_NAME)
 
+# CORS 설정 추가
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 테스트용으로 모두 허용, 실제 배포 시에는 프론트 주소만!
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ✅ 이 줄이 있어야 스웨거에 '유저 관리' 메뉴가 뜹니다!
 app.include_router(user_router)
 app.include_router(products_router.router)
+app.include_router(chat_router.router) # 챗봇 라우터도 포함시킵니다.
 
 @app.get("/")
 def root():

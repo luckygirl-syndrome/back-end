@@ -91,3 +91,60 @@ async def get_chat_response(db: Session, user_id: int, user_answers: dict, user_
     
     response = model.generate_content(builder.build_dynamic_context())
     return response.text
+
+import datetime
+from sqlalchemy.orm import Session
+from app.products.parsers.item_parser import extract_features_from_url
+from app.products.models import Product, UserProduct # 모델 경로 확인
+
+async def parse_and_save_product(db: Session, product_url: str, user_id: int):
+    try:
+        # [Step 1] 파싱 및 모델 추론 (Phase 0)
+        print(f"🚀 [Background] 파싱 시작: {product_url}")
+        result = extract_features_from_url(product_url)
+        
+        if result.get("product_name") == "Error":
+            print(f"❌ 분석 실패: {result.get('details')}")
+            return
+
+        # [Step 2] products 테이블 저장 (Upsert 로직)
+        # 같은 이름의 상품이 있는지 확인 (또는 고유 ID가 있다면 그걸로 확인)
+        product = db.query(Product).filter(Product.product_name == result['product_name']).first()
+        
+        if not product:
+            product = Product(
+                product_name=result['product_name'],
+                platform=result['platform'],
+                discount_rate=result['discount_rate'],
+                review_count=result['review_count'],
+                review_score=float(result.get('rating', 0)),
+                is_direct_shipping=result['is_direct_shipping'],
+                product_likes=str(result.get('product_likes', '0')),
+                # ✅ 6개 심리 축 결과 매핑
+                sim_temptation=result['sim_temptation'],
+                sim_trend_hype=result['sim_trend_hype'],
+                sim_fit_anxiety=result['sim_fit_anxiety'],
+                sim_quality_logic=result['sim_quality_logic'],
+                sim_bundle=result['sim_bundle'],
+                sim_confidence=result['sim_confidence'],
+                created_at=datetime.datetime.now()
+            )
+            db.add(product)
+            db.flush() # user_product_id 연결을 위해 product_id 먼저 생성
+
+        # [Step 3] user_product 연결 테이블 생성
+        user_prod_entry = UserProduct(
+            user_id=user_id,
+            product_id=product.product_id,
+            requested_at=datetime.datetime.now(),
+            status="COMPLETED",
+            created_at=datetime.datetime.now()
+        )
+        db.add(user_prod_entry)
+        
+        db.commit()
+        print(f"✅ [Background] DB 저장 완료: {result['product_name']} (User: {user_id})")
+
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [Background] DB 작업 에러: {str(e)}")

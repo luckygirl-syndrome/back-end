@@ -13,14 +13,10 @@ print("="*50)
 print(f"DEBUG: 현재 SQLAlchemy에 전달되는 주소 -> [{settings.DATABASE_URL[:30]}...]")
 print("="*50)
 
-# 2. SSL 설정을 추가한 엔진 생성 (TiDB Cloud 연결용)
+# settings에서 알아서 환경에 맞는 kwargs를 뱉어줍니다.
 engine = create_engine(
-    settings.DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=3600,
-    connect_args={
-        "ssl": {"ca": "/etc/ssl/certs/ca-certificates.crt"} # 서버(Ubuntu) 환경의 SSL 인증서 경로
-    }
+    settings.DATABASE_URL, 
+    **settings.db_engine_kwargs
 )
 
 # 3. 세션 설정

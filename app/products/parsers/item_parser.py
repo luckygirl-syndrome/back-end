@@ -1,10 +1,9 @@
-# --- 1. Imports ---
-import time
-import re
-import json
-import os
-import pandas as pd
+import os, json, re, time
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -12,41 +11,110 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
-from bs4 import BeautifulSoup
+from transformers import AutoTokenizer, AutoModel
 
-# --- 2. KeywordAxisInfer Implementation ---
+# --- 1. 유틸리티 및 모델 구조 (추가 필수) ---
+def mean_pool(last_hidden_state, attention_mask):
+    mask = attention_mask.unsqueeze(-1).type_as(last_hidden_state)
+    summed = (last_hidden_state * mask).sum(dim=1)
+    counts = mask.sum(dim=1).clamp(min=1e-9)
+    return summed / counts
+
+def load_runtime_config(model_dir: str):
+    cfg_path = os.path.join(model_dir, "config_runtime.json")
+    if not os.path.exists(cfg_path):
+        raise FileNotFoundError(f"config_runtime.json 없음: {cfg_path}")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def apply_rules(text: str, AXES, RULES):
+    t = str(text).lower()
+    scores = np.zeros(len(AXES), dtype=np.float32)
+    for j, ax in enumerate(AXES):
+        for kw in RULES.get(ax, []):
+            if str(kw).lower() in t:
+                scores[j] = 1.0
+                break
+    return scores
+
+class StudentDistillModel(nn.Module):
+    def __init__(self, encoder, hidden_size, out_dim=6, dropout=0.1):
+        super().__init__()
+        self.encoder = encoder
+        self.dropout = nn.Dropout(dropout)
+        self.head = nn.Linear(hidden_size, out_dim)
+
+    def forward(self, input_ids, attention_mask):
+        out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        pooled = mean_pool(out.last_hidden_state, attention_mask)
+        pooled = F.normalize(pooled, p=2, dim=-1)
+        pooled = self.dropout(pooled)
+        return self.head(pooled)
+    
+# --- 4. 모델 로더 (Mac 로컬 최적화 버전) ---
 class KeywordAxisInfer:
-    """
-    KeywordAxisInfer 클래스: 상품명에서 키워드를 추출하여 심리 축(Sim Columns) 분석
-    """
-    def __init__(self, model_path):
-        self.model_path = model_path
-        self.config = self._load_config()
-        self.axes = self.config.get("AXES", [])
-        self.rules = self.config.get("RULES", {})
+    def __init__(self, model_dir: str, device: str | None = None):
+        self.model_dir = model_dir
+        self.cfg = load_runtime_config(model_dir)
 
-    def _load_config(self):
-        config_path = os.path.join(self.model_path, "config_runtime.json")
-        if not os.path.exists(config_path):
-            return {"AXES": [], "RULES": {}}
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        self.AXES = self.cfg["AXES"]
+        self.THRESHOLDS = self.cfg["THRESHOLDS"]
+        self.RULES = self.cfg["RULES"]
+        self.rule_weight = float(self.cfg.get("rule_weight", 1.2))
+        self.max_len = int(self.cfg.get("max_len", 128))
 
-    def infer(self, texts):
-        scores = []
-        labels = []
-        for text in texts:
-            text_str = str(text)
-            row_scores = []
-            for axis in self.axes:
-                keywords = self.rules.get(axis, [])
-                # 언니가 요청한 'ㅇㅇ핏' 등의 규칙이 여기에 반영됨
-                matched = any(keyword in text_str for keyword in keywords)
-                score = 1.0 if matched else 0.0
-                row_scores.append(score)
-            scores.append(row_scores)
-            labels.append(row_scores)
-        return np.array(scores), np.array(labels)
+        # ✅ Mac(M1/M2/M3)을 위해 mps 우선 순위 부여
+        if device is None:
+            if torch.backends.mps.is_available():
+                device = "mps"
+            elif torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+        self.device = torch.device(device)
+        print(f"DEBUG: 현재 장치 -> {self.device}")
+
+        # ✅ 1. Tokenizer 로드 (model_dir 폴더 안의 파일들 사용)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        
+        # ✅ 2. Encoder 로드 (E5 모델 등)
+        self.encoder = AutoModel.from_pretrained(self.cfg["STUDENT_NAME"]).to(self.device)
+
+        # ✅ 3. Student Head 구조 정의 및 가중치 로드
+        hidden = self.encoder.config.hidden_size
+        self.student = StudentDistillModel(self.encoder, hidden_size=hidden, out_dim=len(self.AXES)).to(self.device)
+
+        head_path = os.path.join(model_dir, "student_head.pt")
+        if not os.path.exists(head_path):
+            raise FileNotFoundError(f"student_head.pt 없음! 드라이브에서 받았는지 확인해줘: {head_path}")
+
+        # weights_only=True는 최신 PyTorch 보안 권장사항이야
+        state = torch.load(head_path, map_location=self.device)
+        self.student.load_state_dict(state, strict=True)
+        self.student.eval()
+        print("✅ 진짜 학습 모델(Student Head) 로드 완료!")
+        
+        # 🚀 [추가] 이 부분이 빠져서 에러가 났던 거예요!
+    def infer(self, texts: list[str]):
+        self.student.eval()
+        with torch.no_grad():
+            # 1. 텍스트를 모델이 이해할 수 있는 숫자로 변환
+            inputs = self.tokenizer(
+                texts, 
+                padding=True, 
+                truncation=True, 
+                max_length=self.max_len, 
+                return_tensors="pt"
+            ).to(self.device)
+
+            # 2. 모델 예측 실행
+            logits = self.student(inputs["input_ids"], inputs["attention_mask"])
+            
+            # 3. 결과값 정제 (0~1 사이 확률로 변환 후 0.5 기준으로 0 또는 1 결정)
+            probs = torch.sigmoid(logits).cpu().numpy()
+            labels = (probs > 0.5).astype(int)
+            
+            return probs, labels
 
 # --- 3. Platform Scrapers ---
 
@@ -170,11 +238,25 @@ def detect_platform(url):
         print(f"DEBUG: 인식 실패한 URL -> {url}") 
         raise ValueError(f"지원하지 않는 플랫폼 주소입니다: {url}")
 
+# 전역 변수로 모델 선언
+_INFER_MODEL = None
+
 def extract_features_from_url(url, model_path="./student_distilled_e5_rule"):
+    global _INFER_MODEL
+    
     try:
+        # 1. 모델 로드 (없을 때만 딱 한 번 실행)
+        if _INFER_MODEL is None:
+            if os.path.exists(model_path):
+                print("🚀 모델을 처음 로드합니다. 잠시만 기다려 주세요...")
+                _INFER_MODEL = KeywordAxisInfer(model_dir=model_path)
+            else:
+                print(f"⚠️ 모델 경로 없음: {model_path}")
+
+        # 2. 플랫폼 감지
         platform = detect_platform(url)
     
-    # 데이터 크롤링
+        # 3. 데이터 크롤링 (이 부분은 if문 밖으로 나와야 매번 실행됨!)
         if platform == "musinsa":
             raw_data = MusinsaPerfectScraper().run(url)
         elif platform == "zigzag":
@@ -184,7 +266,7 @@ def extract_features_from_url(url, model_path="./student_distilled_e5_rule"):
         else:
             raw_data = {}
 
-        # 데이터 정규화 (숫자 변환 등)
+        # 4. 데이터 정규화
         product_name = raw_data.get("product_name") or raw_data.get("name") or "Unknown"
     
         def clean_num(val):
@@ -200,20 +282,21 @@ def extract_features_from_url(url, model_path="./student_distilled_e5_rule"):
             "rating": raw_data.get("rating") or raw_data.get("review_rating") or "0",
             "is_direct_shipping": raw_data.get("is_direct_shipping", 0)
         }
-    
 
-    # 심리 축 분석 (모델 로직 연동)
+        # 5. 심리 축 분석 (로드된 전역 모델 _INFER_MODEL 사용)
         SIM_COLS = ["sim_quality_logic", "sim_trend_hype", "sim_temptation", "sim_fit_anxiety", "sim_bundle", "sim_confidence"]
-        if os.path.exists(model_path):
-            nfer_model = KeywordAxisInfer(model_path)
-            _, labels = nfer_model.infer([product_name])
+        
+        if _INFER_MODEL is not None:
+            # ✅ 여기서 새로 생성하지 않고 전역 모델을 사용함!
+            _, labels = _INFER_MODEL.infer([product_name])
             for i, col in enumerate(SIM_COLS):
                 result[col] = int(labels[0][i]) if i < len(labels[0]) else 0
         else:
+            # 모델 로드 실패 시 기본값 0 세팅
             for col in SIM_COLS: result[col] = 0
 
         return result
-    except Exception as e:
-        print(f"CRITICAL ERROR: {e}") # 서버 터미널에 에러 원인을 찍어줘!
-        return {"product_name": "Error", "details": str(e)}
 
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}")
+        return {"product_name": "Error", "details": str(e)}
