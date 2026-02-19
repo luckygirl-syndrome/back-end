@@ -109,24 +109,48 @@ def crawl_ably(url):
     options = Options()
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    # 에이블리는 봇 차단이 심해서 유저 에이전트 설정이 중요해!
+    options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1")
+    
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     try:
         driver.get(url)
-        time.sleep(5)
+        # 페이지 로딩 대기 (최대 10초)
+        wait = WebDriverWait(driver, 10)
+        
+        # 제목이 나타날 때까지 기다리기
+        try:
+            title_el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'h2, .typography__body1')))
+            product_name = title_el.text
+        except:
+            product_name = "제목 추출 실패"
+
         page_text = driver.find_element(By.TAG_NAME, "body").text
-        title_tag = driver.find_elements(By.CSS_SELECTOR, 'h2, p.typography__body1')
-        product_data = {'product_name': title_tag[0].text if title_tag else "제목 없음"}
         
-        price_el = driver.find_elements(By.CLASS_NAME, "color__pink30")
-        product_data['discount_rate'] = price_el[0].text if price_el else "0"
-        
+        # 데이터 정리
+        product_data = {
+            'product_name': product_name,
+            'discount_rate': "0", # 기본값
+            'review_count': "0",
+            'is_direct_shipping': 1 if '오늘출발' in page_text else 0
+        }
+
+        # 할인율 추출 (있을 경우만)
+        price_elements = driver.find_elements(By.CLASS_NAME, "color__pink30")
+        if price_elements:
+            product_data['discount_rate'] = price_elements[0].text
+
+        # 리뷰 수 추출
         count_match = re.search(r'리뷰\s*([\d,]+)개', page_text)
-        product_data['review_count'] = count_match.group(1) if count_match else "0"
-        product_data['is_direct_shipping'] = 1 if '오늘출발' in page_text else 0
+        if count_match:
+            product_data['review_count'] = count_match.group(1)
+
         return product_data
+
     except Exception as e:
-        print(f"Ably Error: {e}")
-        return {}
+        print(f"Ably Parsing Error: {e}")
+        return {} # 에러 나면 빈 딕셔너리 반환해서 500 에러 방지
     finally:
         driver.quit()
 

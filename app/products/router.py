@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.users.router import get_current_user  # 인증된 유저 정보 가져오기
-from .parser.item_parser import extract_features_from_url
+from .parsers.item_parser import extract_features_from_url
 import asyncio
 
 router = APIRouter(prefix="/api/products", tags=["상품 분석"])
