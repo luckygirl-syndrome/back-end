@@ -17,6 +17,14 @@ class ProfileRead(BaseModel):
 
     class Config:
         from_attributes = True
+        
+class SbtiFinalResult(BaseModel):
+    persona_type: str
+    # 💡 Dict 대신 명확한 필드명으로 정의하여 additionalProp을 제거합니다.
+    d_vs_n: AxisDetail
+    s_vs_a: AxisDetail
+    m_vs_t: AxisDetail
+    description: str     # 유저에게 보여줄 성향 설명 문구
 
 # 2. 페르소나 전용 (SBTI 결과)
 class PersonaRead(BaseModel):
@@ -42,10 +50,3 @@ class AxisDetail(BaseModel):
     count_2: int = 0 # 예: N 또는 A 또는 T의 점수
     confidence: float
 
-class SbtiFinalResult(BaseModel):
-    persona_type: str
-    # 💡 Dict 대신 명확한 필드명으로 정의하여 additionalProp을 제거합니다.
-    d_vs_n: AxisDetail
-    s_vs_a: AxisDetail
-    m_vs_t: AxisDetail
-    description: str     # 유저에게 보여줄 성향 설명 문구
