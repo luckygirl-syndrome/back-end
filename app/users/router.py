@@ -12,7 +12,7 @@ from app.core.security import create_access_token, decode_access_token
 router = APIRouter(prefix="/api", tags=["유저 관리"])
 api_key_header = APIKeyHeader(name="Authorization")
 
-# 이 함수는 chat/router.py에서도 불러다 쓸 수 있게 설계
+# 인증 함수: 토큰을 읽어서 현재 유저 객체를 반환
 def get_current_user(token: str = Depends(api_key_header), db: Session = Depends(get_db)):
     payload = decode_access_token(token)
     if not payload:
@@ -24,6 +24,7 @@ def get_current_user(token: str = Depends(api_key_header), db: Session = Depends
         raise HTTPException(status_code=401, detail="유저 없음")
     return user
 
+# 1. 회원가입
 @router.post("/auth/signup")
 def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
@@ -40,6 +41,7 @@ def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return {"status": "success", "user_id": new_user.user_id, "email": new_user.email, "nickname": new_user.nickname}
 
+# 2. 로그인
 @router.post("/auth/login")
 def login(user_data: schemas.UserLogin, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == user_data.email).first()
@@ -49,16 +51,15 @@ def login(user_data: schemas.UserLogin, db: Session = Depends(get_db)):
     access_token = create_access_token(data={"sub": user.email})
     return {"status": "success", "access_token": access_token, "token_type": "bearer"}
 
+# 3. 내 프로필 조회
 @router.get("/profile", response_model=schemas.ProfileRead)
 def get_my_profile(current_user: models.User = Depends(get_current_user)):
-    # 1. 기본 정보 세팅
     profile_data = {
         "nickname": current_user.nickname,
         "profile_img": str(current_user.profile_img) if current_user.profile_img else "1",
-        "description": "" # 기본값
+        "description": ""
     }
     
-    # 2. 페르소나 데이터가 있다면 description 추출
     if current_user.persona_type:
         try:
             persona_json = json.loads(current_user.persona_type)
@@ -68,6 +69,7 @@ def get_my_profile(current_user: models.User = Depends(get_current_user)):
             
     return profile_data
 
+# 4. 프로필 수정 (닉네임, 이미지)
 @router.patch("/setting/profile")
 def update_profile(data: schemas.ProfileUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     if data.nickname is not None: current_user.nickname = data.nickname
@@ -76,6 +78,14 @@ def update_profile(data: schemas.ProfileUpdate, db: Session = Depends(get_db), c
     db.refresh(current_user)
     return {"status": "success", "updated_data": {"nickname": current_user.nickname, "profile_img": current_user.profile_img}}
 
+# 5. 페르소나(SBTI) 결과 저장/조회
+@router.post("/setting/profile/persona")
+def update_sbti_complex(data: schemas.SbtiFinalResult, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    current_user.persona_type = json.dumps(data.model_dump(), ensure_ascii=False)
+    db.commit()
+    db.refresh(current_user)
+    return {"status": "success", "persona": data}
+
 @router.get("/profile/persona", response_model=schemas.PersonaRead)
 def get_my_persona(current_user: models.User = Depends(get_current_user)):
     if not current_user.persona_type: return {"persona": None}
@@ -83,65 +93,25 @@ def get_my_persona(current_user: models.User = Depends(get_current_user)):
         return {"persona": json.loads(current_user.persona_type)}
     except: return {"persona": None}
 
-@router.post("/setting/profile/persona")
-def update_sbti_complex(
-    data: schemas.SbtiFinalResult, 
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(get_current_user)
-):
-    # 1. model_dump()로 딕셔너리 만든 후 JSON 문자열로 저장
-    # (ensure_ascii=False 해야 한글 안 깨져!)
-    current_user.persona_type = json.dumps(data.model_dump(), ensure_ascii=False)
-    
-    db.commit()
-    db.refresh(current_user) # DB에 들어간 거 다시 최신화
-    
-    # 2. 리턴할 때 언니가 방금 보낸 data를 그대로 넣어주면 깔끔!
-    return {
-        "status": "success", 
-        "persona": data  # SbtiFinalResult 객체를 그대로 반환
-    }
-    
+# 6. 관심 쇼핑몰 저장/조회
 @router.post("/profile/shop")
-def update_favorite_shops(
-    data: schemas.UserShopsUpdate, 
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(get_current_user)
-):
-    # 리스트를 JSON 문자열로 변환해서 저장
+def update_favorite_shops(data: schemas.UserShopsUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     current_user.favorite_shops = json.dumps(data.favorite_shops, ensure_ascii=False)
     db.commit()
-    
     return {"status": "success", "favorite_shops": data.favorite_shops}
 
 @router.get("/profile/shop")
 def get_favorite_shops(current_user: models.User = Depends(get_current_user)):
-    if not current_user.favorite_shops:
-        return {"favorite_shops": []}
-        
+    if not current_user.favorite_shops: return {"favorite_shops": []}
     return {"favorite_shops": json.loads(current_user.favorite_shops)}
 
+# 7. 추구미 저장/조회
 @router.post("/profile/chugume")
-def update_chugume(
-    data: schemas.ChugumeUpdate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    # Enum에서 선택된 한글 값을 DB에 저장
+def update_chugume(data: schemas.ChugumeUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     current_user.chu_gu_me = data.chugume_type.value
     db.commit()
-    
-    return {
-        "status": "success", 
-        "message": f"추구미가 '{current_user.chu_gu_me}'로 설정되었습니다!"
-    }
+    return {"status": "success", "message": f"추구미가 '{current_user.chu_gu_me}'로 설정되었습니다!"}
     
 @router.get("/profile/chugume")
-def get_chugume(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    # 유저 정보에서 추구미 값을 가져옴 (없으면 None 반환)
-    return {
-        "chugume_type": current_user.chu_gu_me
-    }
+def get_chugume(current_user: models.User = Depends(get_current_user)):
+    return {"chugume_type": current_user.chu_gu_me}

@@ -1,13 +1,8 @@
 from pydantic import BaseModel, EmailStr
-from typing import Optional, Any, Dict
-
-from pydantic import BaseModel, EmailStr
-from typing import Optional
-
+from typing import Optional, List
 from enum import Enum
-from typing import List
 
-
+# 1. 회원가입/로그인용
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
@@ -17,22 +12,23 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+# 2. 기본 프로필 조회용 (router의 get_my_profile과 규격 맞춤)
 class ProfileRead(BaseModel):
     nickname: str
-    profile_img: Optional[str] = "1"
-    description: Optional[str] = None  # 성향 설명 필드 추가
+    profile_img: str
+    description: str
 
     class Config:
         from_attributes = True
 
+# 3. SBTI/페르소나 데이터 구조
 class AxisScore(BaseModel):
-    result: str    # "D" 또는 "N"
-    score: int     # 3개 질문 중 해당 타입이 선택된 개수 (0~3)
+    result: str    # "D" 또는 "N" 등
+    score: int     # 0~3
 
 class SbtiFinalResult(BaseModel):
     persona_type: str  # "DSN"
     description: str   # "도파민 중독자"
-    # 각 축의 점수만 딱 저장 (9개 질문 결과 요약)
     d_vs_n: AxisScore
     s_vs_a: AxisScore
     m_vs_t: AxisScore 
@@ -40,10 +36,12 @@ class SbtiFinalResult(BaseModel):
 class PersonaRead(BaseModel):
     persona: Optional[SbtiFinalResult] = None
 
+# 4. 프로필 수정용
 class ProfileUpdate(BaseModel):
     nickname: Optional[str] = None
     profile_img: Optional[str] = None
     
+# 5. 쇼핑몰 및 추구미 (언니가 저장해달라고 했던 핵심 기능!)
 class ShopName(str, Enum):
     MUSINSA = "무신사"
     ABLY = "에이블리"
