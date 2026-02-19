@@ -84,7 +84,20 @@ def get_my_persona(current_user: models.User = Depends(get_current_user)):
     except: return {"persona": None}
 
 @router.post("/setting/profile/persona")
-def update_sbti_complex(data: schemas.SbtiFinalResult, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def update_sbti_complex(
+    data: schemas.SbtiFinalResult, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    # 1. model_dump()로 딕셔너리 만든 후 JSON 문자열로 저장
+    # (ensure_ascii=False 해야 한글 안 깨져!)
     current_user.persona_type = json.dumps(data.model_dump(), ensure_ascii=False)
+    
     db.commit()
-    return {"status": "success", "persona_type": data.persona_type}
+    db.refresh(current_user) # DB에 들어간 거 다시 최신화
+    
+    # 2. 리턴할 때 언니가 방금 보낸 data를 그대로 넣어주면 깔끔!
+    return {
+        "status": "success", 
+        "persona": data  # SbtiFinalResult 객체를 그대로 반환
+    }
