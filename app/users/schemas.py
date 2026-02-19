@@ -10,6 +10,14 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
     
+class AxisDetail(BaseModel):
+    result: str
+    # 해당 축에 필요한 카운트만 남기거나, 공통으로 사용합니다.
+    count_1: int = 0 # 예: D 또는 S 또는 M의 점수
+    count_2: int = 0 # 예: N 또는 A 또는 T의 점수
+    confidence: float
+
+
 # 1. 기본 프로필용 (이름, 이미지)
 class ProfileRead(BaseModel):
     name: str
@@ -42,11 +50,4 @@ class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     profile_image_index: Optional[int] = None
     
-
-class AxisDetail(BaseModel):
-    result: str
-    # 해당 축에 필요한 카운트만 남기거나, 공통으로 사용합니다.
-    count_1: int = 0 # 예: D 또는 S 또는 M의 점수
-    count_2: int = 0 # 예: N 또는 A 또는 T의 점수
-    confidence: float
 
