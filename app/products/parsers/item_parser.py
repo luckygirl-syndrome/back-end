@@ -139,43 +139,49 @@ def detect_platform(url):
     raise ValueError("지원하지 않는 플랫폼 주소입니다.")
 
 def extract_features_from_url(url, model_path="./student_distilled_e5_rule"):
-    platform = detect_platform(url)
+    try:
+        platform = detect_platform(url)
     
     # 데이터 크롤링
-    if platform == "musinsa":
-        raw_data = MusinsaPerfectScraper().run(url)
-    elif platform == "zigzag":
-        raw_data = ZigzagDetailCrawler().crawl_detail(url)
-    elif platform == "ably":
-        raw_data = crawl_ably(url)
-    else:
-        raw_data = {}
+        if platform == "musinsa":
+            raw_data = MusinsaPerfectScraper().run(url)
+        elif platform == "zigzag":
+            raw_data = ZigzagDetailCrawler().crawl_detail(url)
+        elif platform == "ably":
+            raw_data = crawl_ably(url)
+        else:
+            raw_data = {}
 
-    # 데이터 정규화 (숫자 변환 등)
-    product_name = raw_data.get("product_name") or raw_data.get("name") or "Unknown"
+        # 데이터 정규화 (숫자 변환 등)
+        product_name = raw_data.get("product_name") or raw_data.get("name") or "Unknown"
     
-    def clean_num(val):
-        if not val: return 0
-        num = re.sub(r'[^0-9]', '', str(val))
-        return int(num) if num else 0
+        def clean_num(val):
+            if not val: return 0
+            num = re.sub(r'[^0-9]', '', str(val))
+            return int(num) if num else 0
 
-    result = {
-        "platform": platform,
-        "product_name": product_name,
-        "discount_rate": clean_num(raw_data.get("discount_rate")),
-        "review_count": clean_num(raw_data.get("review_count")),
-        "rating": raw_data.get("rating") or raw_data.get("review_rating") or "0",
-        "is_direct_shipping": raw_data.get("is_direct_shipping", 0)
-    }
+        result = {
+            "platform": platform,
+            "product_name": product_name,
+            "discount_rate": clean_num(raw_data.get("discount_rate")),
+            "review_count": clean_num(raw_data.get("review_count")),
+            "rating": raw_data.get("rating") or raw_data.get("review_rating") or "0",
+            "is_direct_shipping": raw_data.get("is_direct_shipping", 0)
+        }
+    
 
     # 심리 축 분석 (모델 로직 연동)
-    SIM_COLS = ["sim_quality_logic", "sim_trend_hype", "sim_temptation", "sim_fit_anxiety", "sim_bundle", "sim_confidence"]
-    if os.path.exists(model_path):
-        infer_model = KeywordAxisInfer(model_path)
-        _, labels = infer_model.infer([product_name])
-        for i, col in enumerate(SIM_COLS):
-            result[col] = int(labels[0][i]) if i < len(labels[0]) else 0
-    else:
-        for col in SIM_COLS: result[col] = 0
+        SIM_COLS = ["sim_quality_logic", "sim_trend_hype", "sim_temptation", "sim_fit_anxiety", "sim_bundle", "sim_confidence"]
+        if os.path.exists(model_path):
+            nfer_model = KeywordAxisInfer(model_path)
+            _, labels = nfer_model.infer([product_name])
+            for i, col in enumerate(SIM_COLS):
+                result[col] = int(labels[0][i]) if i < len(labels[0]) else 0
+        else:
+            for col in SIM_COLS: result[col] = 0
 
-    return result
+        return result
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}") # 서버 터미널에 에러 원인을 찍어줘!
+        return {"product_name": "Error", "details": str(e)}
+
