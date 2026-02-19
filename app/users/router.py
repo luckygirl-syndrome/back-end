@@ -7,32 +7,21 @@ from jose import jwt, JWTError
 from app.core.config import settings
 from fastapi.security import APIKeyHeader
 import json
+from app.core.security import create_access_token, decode_access_token
 
 router = APIRouter(prefix="/api", tags=["유저 관리"])
 api_key_header = APIKeyHeader(name="Authorization")
 
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-
+# 이 함수는 chat/router.py에서도 불러다 쓸 수 있게 설계
 def get_current_user(token: str = Depends(api_key_header), db: Session = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="인증 정보가 유효하지 않습니다.",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        if token.startswith("Bearer "):
-            token = token.replace("Bearer ", "")
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None: raise credentials_exception
-    except JWTError: raise credentials_exception
-        
+    payload = decode_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="인증 실패")
+    
+    email = payload.get("sub")
     user = db.query(models.User).filter(models.User.email == email).first()
-    if user is None: raise credentials_exception
+    if not user:
+        raise HTTPException(status_code=401, detail="유저 없음")
     return user
 
 @router.post("/auth/signup")
