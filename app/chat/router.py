@@ -1,5 +1,6 @@
 from http.client import HTTPException
 
+from app.chat.logic.impulse_calculator import analyze_product_risk
 from app.products.models import UserProduct
 from app.users.models import User
 from app.users.router import get_current_user
@@ -15,30 +16,53 @@ async def start_chat(
     product_url: str, 
     background_tasks: BackgroundTasks, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user) # ✅ 이제 토큰 없으면 호출 자체가 안 됨
+    current_user: User = Depends(get_current_user) # ✅ 토큰으로 유저 식별
 ):
-    # current_user.user_id를 안전하게 사용
-    background_tasks.add_task(
-        service.parse_and_save_product, 
-        db, 
-        product_url, 
-        current_user.user_id
-    )
+    # 1. current_user에 sbti_code가 이미 있다고 가정합니다.
+    # 만약 유저 테이블에 없다면, db에서 유저 정보를 한 번 조회해서 가져와야 합니다.
+    user_sbti = current_user.sbti_code if hasattr(current_user, 'sbti_code') else "D-S-T" # 기본값 예시
 
-    # [Phase 0] 질문을 AI가 하는 게 아니라, 정해진 공통 질문 세트를 프론트에 전달
-    # 프론트는 이걸 받아서 유저에게 설문 UI(라디오 버튼 등)를 보여주게 됨
+    # 2. 백그라운드 태스크에 user_sbti 인자 추가
+    background_tasks.add_task(
+    service.parse_and_save_product, 
+    db, 
+    product_url, 
+    current_user  # ✅ 여기서 3개만 넘김 (db, url, user)
+)
+    # 3. 유저에게는 분석 시작 알림과 설문지 전달
     return {
         "status": "ANALYSIS_STARTED",
         "survey_config": {
             "q1": "이거 장바구니/찜에 담은 지 얼마나 됐어?",
-            "q2": "나한테 왜 연락한 거야?)",
+            "q2": "나한테 왜 연락한 거야?",
             "q3": "이 옷, 이미 거의 사기로 마음 정한 상태야? 아니면 아직 확신이 부족해?",
             "qc": "이 옷의 어떤 점이 네 마음을 뺏었어?"
         },
         "message": "분석 시작했어! 그전에 네 상태 좀 체크해보자."
     }
 
-# app/chat/router.py
+
+@router.post("/process-product")
+async def process_product(url: str, user_sbti: str, db: Session = Depends(get_db)):
+    # 1. 크롤링 수행 (가정: crawl_data 함수가 결과 dict를 반환)
+    raw_data = await crawling_service.crawl_url(url)
+    
+    # 2. DB에 저장 (이때 ㅇㅇ핏 정보 등도 같이 저장)
+    new_product = models.Product(**raw_data)
+    db.add(new_product)
+    db.commit()
+    db.refresh(new_product) # 생성된 product_id를 가져옴
+    
+    # 3. "타고 타고" 분석 로직 실행
+    # DB에 저장된 객체를 dict로 변환하여 분석기에 전달
+    analysis_result = analyze_product_risk(raw_data, user_sbti) # 위험도 분석해 스코어 반환
+    
+    return {
+        "message": "분석 완료!",
+        "product_id": new_product.product_id,
+        "analysis": analysis_result
+    }
+
 
 @router.post("/finalize-survey")
 async def finalize_survey(
@@ -64,3 +88,4 @@ async def finalize_survey(
     )
     
     return {"reply": first_response}
+

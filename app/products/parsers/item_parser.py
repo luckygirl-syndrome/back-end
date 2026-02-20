@@ -13,29 +13,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from transformers import AutoTokenizer, AutoModel
 
-# --- 1. 유틸리티 및 모델 구조 (추가 필수) ---
 def mean_pool(last_hidden_state, attention_mask):
     mask = attention_mask.unsqueeze(-1).type_as(last_hidden_state)
     summed = (last_hidden_state * mask).sum(dim=1)
     counts = mask.sum(dim=1).clamp(min=1e-9)
     return summed / counts
-
-def load_runtime_config(model_dir: str):
-    cfg_path = os.path.join(model_dir, "config_runtime.json")
-    if not os.path.exists(cfg_path):
-        raise FileNotFoundError(f"config_runtime.json 없음: {cfg_path}")
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def apply_rules(text: str, AXES, RULES):
-    t = str(text).lower()
-    scores = np.zeros(len(AXES), dtype=np.float32)
-    for j, ax in enumerate(AXES):
-        for kw in RULES.get(ax, []):
-            if str(kw).lower() in t:
-                scores[j] = 1.0
-                break
-    return scores
 
 class StudentDistillModel(nn.Module):
     def __init__(self, encoder, hidden_size, out_dim=6, dropout=0.1):
@@ -49,9 +31,36 @@ class StudentDistillModel(nn.Module):
         pooled = mean_pool(out.last_hidden_state, attention_mask)
         pooled = F.normalize(pooled, p=2, dim=-1)
         pooled = self.dropout(pooled)
-        return self.head(pooled)
-    
-# --- 4. 모델 로더 (Mac 로컬 최적화 버전) ---
+        scores = self.head(pooled)
+        return scores
+
+def load_runtime_config(model_dir: str):
+    cfg_path = os.path.join(model_dir, "config_runtime.json")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def apply_rules(text: str, AXES, RULES):
+    t = str(text).lower()
+    scores = np.zeros(len(AXES), dtype=np.float32)
+    for j, ax in enumerate(AXES):
+        for kw in RULES.get(ax, []):
+            target = str(kw).lower()
+
+            # 울 예외: "겨울" 포함된 문맥은 울 무시
+            if target == "울":
+                clean = t.replace("겨울", " ")
+                if "울" in clean:
+                    if ax == "quality_logic":
+                        scores[j] = 1.0
+                    break
+                else:
+                    continue
+
+            if target in t:
+                scores[j] = 1.0
+                break
+    return scores
+
 class KeywordAxisInfer:
     def __init__(self, model_dir: str, device: str | None = None):
         self.model_dir = model_dir
@@ -62,59 +71,72 @@ class KeywordAxisInfer:
         self.RULES = self.cfg["RULES"]
         self.rule_weight = float(self.cfg.get("rule_weight", 1.2))
         self.max_len = int(self.cfg.get("max_len", 128))
+        dropout = float(self.cfg.get("dropout", 0.0))
 
-        # ✅ Mac(M1/M2/M3)을 위해 mps 우선 순위 부여
         if device is None:
-            if torch.backends.mps.is_available():
-                device = "mps"
-            elif torch.cuda.is_available():
-                device = "cuda"
-            else:
-                device = "cpu"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
-        print(f"DEBUG: 현재 장치 -> {self.device}")
 
-        # ✅ 1. Tokenizer 로드 (model_dir 폴더 안의 파일들 사용)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
-        
-        # ✅ 2. Encoder 로드 (E5 모델 등)
-        self.encoder = AutoModel.from_pretrained(self.cfg["STUDENT_NAME"]).to(self.device)
+        base_name = self.cfg.get("STUDENT_NAME", "intfloat/multilingual-e5-base")
 
-        # ✅ 3. Student Head 구조 정의 및 가중치 로드
+        # ✅ tokenizer/encoder 둘 다 base_name에서 로드
+        self.tokenizer = AutoTokenizer.from_pretrained(base_name)
+        self.encoder = AutoModel.from_pretrained(base_name).to(self.device)
+
         hidden = self.encoder.config.hidden_size
-        self.student = StudentDistillModel(self.encoder, hidden_size=hidden, out_dim=len(self.AXES)).to(self.device)
+        self.student = StudentDistillModel(
+            self.encoder, hidden_size=hidden, out_dim=len(self.AXES), dropout=dropout
+        ).to(self.device)
 
         head_path = os.path.join(model_dir, "student_head.pt")
-        if not os.path.exists(head_path):
-            raise FileNotFoundError(f"student_head.pt 없음! 드라이브에서 받았는지 확인해줘: {head_path}")
-
-        # weights_only=True는 최신 PyTorch 보안 권장사항이야
         state = torch.load(head_path, map_location=self.device)
-        self.student.load_state_dict(state, strict=True)
-        self.student.eval()
-        print("✅ 진짜 학습 모델(Student Head) 로드 완료!")
-        
-        # 🚀 [추가] 이 부분이 빠져서 에러가 났던 거예요!
-    def infer(self, texts: list[str]):
-        self.student.eval()
-        with torch.no_grad():
-            # 1. 텍스트를 모델이 이해할 수 있는 숫자로 변환
-            inputs = self.tokenizer(
-                texts, 
-                padding=True, 
-                truncation=True, 
-                max_length=self.max_len, 
-                return_tensors="pt"
-            ).to(self.device)
 
-            # 2. 모델 예측 실행
-            logits = self.student(inputs["input_ids"], inputs["attention_mask"])
-            
-            # 3. 결과값 정제 (0~1 사이 확률로 변환 후 0.5 기준으로 0 또는 1 결정)
-            probs = torch.sigmoid(logits).cpu().numpy()
-            labels = (probs > 0.5).astype(int)
-            
-            return probs, labels
+        # ✅ head만 로드 (저장 형태 2가지 모두 대응)
+        # 1) {"weight":..., "bias":...}
+        if "weight" in state and "bias" in state:
+            self.student.head.load_state_dict(state, strict=True)
+        # 2) {"head.weight":..., "head.bias":...} 혹은 전체 state_dict
+        else:
+            # head.* 만 추출해서 로드 시도
+            head_state = {k.replace("head.", ""): v for k, v in state.items() if k.startswith("head.")}
+            if head_state:
+                self.student.head.load_state_dict(head_state, strict=True)
+            else:
+                # 마지막 수단: 전체 로드(학습 때 전체 저장했으면 여기서 성공)
+                self.student.load_state_dict(state, strict=False)
+
+        self.student.eval()
+
+    @torch.no_grad()
+    def predict_scores(self, texts, batch_size: int = 128):
+        outs = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            enc = self.tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=self.max_len,
+                return_tensors="pt"
+            )
+            input_ids = enc["input_ids"].to(self.device)
+            attn = enc["attention_mask"].to(self.device)
+
+            s = self.student(input_ids, attn)  # (B,6)
+            outs.append(s.detach().cpu().numpy())
+        return np.vstack(outs).astype(np.float32)
+
+    def infer(self, texts, batch_size: int = 128):
+        student_scores = self.predict_scores(texts, batch_size=batch_size)
+        rule_scores = np.vstack([apply_rules(t, self.AXES, self.RULES) for t in texts])
+
+        final_scores = student_scores + self.rule_weight * rule_scores
+
+        final_labels = np.zeros_like(final_scores, dtype=np.int32)
+        for j, ax in enumerate(self.AXES):
+            final_labels[:, j] = (final_scores[:, j] >= float(self.THRESHOLDS[ax])).astype(np.int32)
+
+        return final_scores, final_labels
 
 # --- 3. Platform Scrapers ---
 
@@ -241,17 +263,20 @@ def detect_platform(url):
 # 전역 변수로 모델 선언
 _INFER_MODEL = None
 
-def extract_features_from_url(url, model_path="./student_distilled_e5_rule"):
+def extract_features_from_url(url): # ✅ model_path 인자를 아예 제거하거나 안 쓰게 수정
     global _INFER_MODEL
+    
+    # 1. 모델 경로 설정 (고정)
+    model_dir = "./student_distilled_e5_rule"
     
     try:
         # 1. 모델 로드 (없을 때만 딱 한 번 실행)
         if _INFER_MODEL is None:
-            if os.path.exists(model_path):
-                print("🚀 모델을 처음 로드합니다. 잠시만 기다려 주세요...")
-                _INFER_MODEL = KeywordAxisInfer(model_dir=model_path)
+            if os.path.exists(model_dir):
+                print("🚀 전역 모델을 처음 로드합니다...")
+                _INFER_MODEL = KeywordAxisInfer(model_dir=model_dir)
             else:
-                print(f"⚠️ 모델 경로 없음: {model_path}")
+                print(f"⚠️ 모델 경로 없음: {model_dir}")
 
         # 2. 플랫폼 감지
         platform = detect_platform(url)

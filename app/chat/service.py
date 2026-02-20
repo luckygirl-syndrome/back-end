@@ -1,6 +1,7 @@
 import os
 from sqlalchemy.orm import Session
 from app.users.models import User
+from app.products.models import Product, UserProduct # 파일명이 models.py 인지 확인!
 from .prompt import TobabaPromptBuilder
 import google.generativeai as genai
 from .constants import IMPULSE_GUIDE_DATA
@@ -97,54 +98,101 @@ from sqlalchemy.orm import Session
 from app.products.parsers.item_parser import extract_features_from_url
 from app.products.models import Product, UserProduct # 모델 경로 확인
 
-async def parse_and_save_product(db: Session, product_url: str, user_id: int):
+import json
+from app.chat.logic.impulse_calculator import analyze_product_risk # 아까 만든 로직 임포트
+
+def parse_and_save_product(db: Session, url: str, user: User):
     try:
-        # [Step 1] 파싱 및 모델 추론 (Phase 0)
-        print(f"🚀 [Background] 파싱 시작: {product_url}")
-        result = extract_features_from_url(product_url)
+        # 1. 유저 정보 추출 (코드 정제)
+        user_id = user.user_id
+        persona_obj = getattr(user, 'persona_type', None)
+
+        # ✅ 유저 페르소나 객체에서 "SDM" 같은 3글자 코드만 쏙 뽑아내기
+        if isinstance(persona_obj, dict):
+            user_persona_code = persona_obj.get("persona_type", "D-S-T")
+        elif hasattr(persona_obj, 'persona_type'):
+            user_persona_code = persona_obj.persona_type
+        else:
+            try:
+                # 만약 문자열(JSON) 형태로 들어온 경우 파싱
+                import json
+                data = json.loads(persona_obj)
+                user_persona_code = data.get("persona_type", "D-S-T")
+            except:
+                # 최후의 보루: 문자열에서 앞 3글자만 가져오기
+                user_persona_code = str(persona_obj)[:3] if persona_obj else "D-S-T"
+
+        print(f"🧐 분석 시작 - 유저: {user_id}, 최종 페르소나 코드: {user_persona_code}")
         
-        if result.get("product_name") == "Error":
-            print(f"❌ 분석 실패: {result.get('details')}")
+        # 2. 크롤링 및 분석 수행
+        result = extract_features_from_url(url)
+        if not result:
+            print("❌ 분석 결과가 없습니다.")
             return
 
-        # [Step 2] products 테이블 저장 (Upsert 로직)
-        # 같은 이름의 상품이 있는지 확인 (또는 고유 ID가 있다면 그걸로 확인)
-        product = db.query(Product).filter(Product.product_name == result['product_name']).first()
+        # [Step 1] 위험도 분석 로직 실행 (정제된 코드 "SDM" 등 전달)
+        # ✅ persona_obj 대신 user_persona_code를 넣으세요!
+        risk_analysis = analyze_product_risk(result, user_persona_code)
+
+        # [Step 2] products 테이블 저장 (UnboundLocalError 방지 로직)
+        product_name = result.get('product_name', '이름 없는 상품')
+        
+        # ✅ 필독: 여기서 먼저 조회를 해서 product 변수를 확실히 만듭니다.
+        product = db.query(Product).filter(Product.product_name == product_name).first()
         
         if not product:
+            print(f"🆕 새 상품 등록: {product_name}")
             product = Product(
-                product_name=result['product_name'],
-                platform=result['platform'],
-                discount_rate=result['discount_rate'],
-                review_count=result['review_count'],
+                product_name=product_name,
+                platform=result.get('platform', 'Unknown'),
+                category=result.get('category', '기타'),
+                price=int(result.get('price', 0)),
+                discount_rate=float(result.get('discount_rate', 0)),
+                is_direct_shipping=bool(result.get('is_direct_shipping', False)),
+                free_shipping=bool(result.get('free_shipping', False)),
+                review_count=int(result.get('review_count', 0)),
                 review_score=float(result.get('rating', 0)),
-                is_direct_shipping=result['is_direct_shipping'],
                 product_likes=str(result.get('product_likes', '0')),
-                # ✅ 6개 심리 축 결과 매핑
-                sim_temptation=result['sim_temptation'],
-                sim_trend_hype=result['sim_trend_hype'],
-                sim_fit_anxiety=result['sim_fit_anxiety'],
-                sim_quality_logic=result['sim_quality_logic'],
-                sim_bundle=result['sim_bundle'],
-                sim_confidence=result['sim_confidence'],
+                # ✅ ㅇㅇ핏 등 심리 축 저장 (KeywordAxisInfer 결과)
+                sim_temptation=result.get('sim_temptation', 0),
+                sim_trend_hype=result.get('sim_trend_hype', 0),
+                sim_fit_anxiety=result.get('sim_fit_anxiety', 0),
+                sim_quality_logic=result.get('sim_quality_logic', 0),
+                sim_bundle=result.get('sim_bundle', 0),
+                sim_confidence=result.get('sim_confidence', 0),
                 created_at=datetime.datetime.now()
             )
             db.add(product)
-            db.flush() # user_product_id 연결을 위해 product_id 먼저 생성
+            db.flush() # ID를 즉시 생성
+        else:
+            print(f"♻️ 기존 상품 정보 활용: {product_name}")
 
         # [Step 3] user_product 연결 테이블 생성
         user_prod_entry = UserProduct(
             user_id=user_id,
             product_id=product.product_id,
             requested_at=datetime.datetime.now(),
+            
+            # ✅ 작업 완료 시점이므로 현재 시간 기록
+            completed_at=datetime.datetime.now(), 
+            
+            # ✅ 모델의 필드명 risk_score_1에 점수 저장
+            risk_score_1=int(risk_analysis.get('total_score', 0)),
+            
+            # ✅ 유저의 페르소나 코드(SDM 등)를 user_type에 기록 (나중에 분석용)
+            user_type=user_persona_code, 
+            
             status="COMPLETED",
-            created_at=datetime.datetime.now()
+            is_purchased=0, # 기본값: 미구매
+            created_at=datetime.datetime.now(),
+            updated_at=datetime.datetime.now()
         )
-        db.add(user_prod_entry)
         
+        db.add(user_prod_entry)
         db.commit()
-        print(f"✅ [Background] DB 저장 완료: {result['product_name']} (User: {user_id})")
+        
+        print(f"✅ [Background] 최종 저장 성공! (상품ID: {product.product_id}, 점수: {risk_analysis.get('total_score')}점)")
 
     except Exception as e:
         db.rollback()
-        print(f"❌ [Background] DB 작업 에러: {str(e)}")
+        print(f"❌ [Background] DB 작업 중 진짜 에러 발생: {str(e)}")
