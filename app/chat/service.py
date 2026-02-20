@@ -5,8 +5,18 @@ from app.products.models import Product, UserProduct # 파일명이 models.py �
 from .prompt import TobabaPromptBuilder
 import google.generativeai as genai
 from .constants import IMPULSE_GUIDE_DATA
+import joblib
 
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+# 챗봇 설명용 한글 매핑
+FEATURE_KO = {
+    'discount_rate': '할인율', 'review_count': '리뷰 수', 'review_score': '평점',
+    'product_like': '찜 수', 'shipping_info': '배송 정보', 'free_shipping': '무료 배송',
+    'sim_trend_hype': '유행/대란 키워드', 'sim_temptation': '자극적 홍보 문구',
+    'sim_fit_anxiety': '핏/체형 보정 문구', 'sim_quality_logic': '소재/퀄리티 강조',
+    'sim_bundle': '1+1/묶음 할인', 'sim_confidence': 'MD추천/보증'
+}
 
 def get_logic_gate_mode(user_answers: dict):
     # 1. 질문별 스코어 테이블 설정
@@ -116,13 +126,25 @@ PRIOR_MODEL_DIR = "/Users/nau/Documents/GitHub/Back-end/models/artifacts_prior/"
 
 def parse_and_save_product(db: Session, url: str, user: User):
     try:
-        # 1. 유저 페르소나 코드 추출 (SDM, DAM 등)
-        user_id = user.user_id
-        persona_obj = getattr(user, 'persona_type', None)
-        if isinstance(persona_obj, dict):
-            user_persona_code = persona_obj.get("persona_type", "D-S-T")
+        # 1. 페르소나 추출 및 하이픈 형태(D-S-T)로 만들기
+        persona_raw = getattr(user, 'persona_type', "D-S-T")
+        
+        if isinstance(persona_raw, str) and persona_raw.startswith('{'):
+            try:
+                persona_data = json.loads(persona_raw)
+                persona_raw = persona_data.get('persona_code', 'D-S-T')
+            except:
+                persona_raw = "D-S-T"
+
+        # 🔥 핵심: DST가 들어오면 D-S-T로, D-S-T면 그대로!
+        temp_code = str(persona_raw).replace("-", "").upper() # 일단 다 합치고
+        if len(temp_code) == 3:
+            # DST -> D-S-T 변환
+            user_persona_code = f"{temp_code[0]}-{temp_code[1]}-{temp_code[2]}"
         else:
-            user_persona_code = str(persona_obj)[:3] if persona_obj else "D-S-T"
+            user_persona_code = temp_code # 이미 형식이 맞으면 그대로
+
+        print(f"DEBUG: 모델이 좋아하는 최종 코드 -> [{user_persona_code}]")
 
         # 2. 크롤링 수행
         result = extract_features_from_url(url)
@@ -155,8 +177,22 @@ def parse_and_save_product(db: Session, url: str, user: User):
         }
 
         # [Step 2] 선호도 분석 (Preference)
-        pref_out = infer_all(item_json=pref_item_input, persona_type=user_persona_code, prior_dir=PRIOR_MODEL_DIR)
+        # 이제 이 코드로 분석 실행!
+        pref_out = infer_all(item_json=result, persona_type=user_persona_code, prior_dir=PRIOR_MODEL_DIR)
         total_pref_score = int(pref_out['total_score']) # 👈 이게 선호도
+
+        prior_score     = pref_out["prior_score"]
+        prior_reasons   = pref_out["prior_reason_top2"]     # 리스트 형태
+        personal_score  = pref_out["personal_score"]
+        personal_type   = pref_out["personal_reason_type"]  # positive/risk/neutral
+        personal_reasons= pref_out["personal_reason_top2"]   # 리스트 형태
+        alpha           = pref_out["alpha"]
+        n_eff           = pref_out["n_effective"]
+
+        # 1. 위험도 분석 결과 상세 추출 (analyze_product_risk의 리턴값)
+        risk_label    = risk_analysis["risk_label"]
+        risk_level    = risk_analysis["risk_level"]
+        risk_causes   = risk_analysis["top_2_causes"]
 
         # ---------------------------------------------------------
         # [Step 3] DB 저장
@@ -187,7 +223,7 @@ def parse_and_save_product(db: Session, url: str, user: User):
             db.flush()
 
         user_prod_entry = UserProduct(
-            user_id=user_id,
+            user_id=user.user_id,         
             product_id=product.product_id,
             user_type=user_persona_code,
             risk_score_1=impulse_score,    # 위험도 (Brake 수위)
@@ -201,50 +237,85 @@ def parse_and_save_product(db: Session, url: str, user: User):
         # ---------------------------------------------------------
         # [Step 4] 프롬프트 빌더용 데이터 구성 (핵심!)
         # ---------------------------------------------------------
-        # 위험도에 따른 모드 결정 (70점 이상이면 강력 제동)
         current_mode = "BRAKE" if impulse_score >= 50 else "DECIDER"
         
         prompt_data = {
             "user_context": {
                 "persona_type": user_persona_code,
-                "target_style": getattr(user, 'target_style', '심플/캐주얼')
+                "target_style": getattr(user, 'target_style', '심플/캐주얼'),
+                "n_effective": n_eff
             },
-            "product_context": {
-                "name": product.product_name,
-                "price": product.price,
-                "brand": result.get('brand', 'Unknown')
-            },
-            "mode_block": {"current_mode": current_mode},
-            "impulse_block": {
+            "analysis_result": {
+                "total_prefer_score": total_pref_score,
                 "impulse_score": impulse_score,
-                # 위험 요소 상위 2개 추출
-                "impulse_reason_top2": [
-                    {"feature_key": r[0], "guide": "위험 요인"} for r in risk_analysis.get('top_reasons', [])[:2]
+                "alpha_value": alpha,
+                "current_mode": current_mode
+            },
+            "prior_analysis": {
+                "score": prior_score,
+                "top_reasons": [
+                    {"feature": r[0], "value": r[1]} for r in prior_reasons # 👈 r[1]이 이제 '값'임
                 ]
             },
-            "preference_block": {
-                "total_score": total_pref_score,
-                "personal_score": pref_out['personal_score'],
-                "preference_priority": pref_out['alpha'] < 0.5 and "personal" or "prior",
-                # 선호 요소 상위 2개 추출 (prior_reason_top3 활용)
-                "prior_reason_top2": [
-                    {"feature_key": r[0], "guide": "유저 그룹 선호 요인"} for r in pref_out['prior_reason_top3'][:2]
-                ],
-                "personal_reason_top2": [
-                    {"feature_key": r[0], "guide": "유저 개인 취향 일치"} for r in pref_out['personal_reason_top3'][:2]
+            "personal_analysis": {
+                "score": personal_score,
+                "reason_type": personal_type,
+                "top_reasons": [
+                    {"feature": r[0], "value": r[1]} for r in personal_reasons # 👈 여기도 '값'으로 매칭
                 ]
             },
-            "conversation_block": {
-                "cart_duration": "방금 막",
-                "key_appeal": result.get('key_appeal', '디자인/핏')
+            "impulse_block": {
+                "score": impulse_score,
+                "label": risk_label,
+                "level": risk_level,
+                "top_causes": [
+                    {
+                        "name": c["feature_name"],
+                        "detail": c["detail"]
+                    } for c in risk_causes
+                ]
             },
-            "strategy_matrix": {
-                "goal": current_mode == "BRAKE" and "충동 억제" or "구매 확신",
-                "strategy": "위험도와 선호도를 교차 분석하여 대응"
+            "strategy": {
+                "goal": "충동 억제" if current_mode == "BRAKE" else "구매 확신",
+                "main_logic": "personal" if alpha < 0.5 else "prior"
             }
         }
 
-        print(f"✅ 분석 및 저장 완료 (Risk: {impulse_score}, Prefer: {total_pref_score})")
+        # [Step 5] Terminal Report (최종 정리)
+        print("\n" + "-"*60)
+        print(f" SYSTEM ANALYSIS REPORT | USER: {user.user_id} | PERSONA: {user_persona_code}")
+        print("-" * 60)
+        print(f" [PRODUCT] {product.product_name}")
+        print(f" [STATUS ] Mode: {current_mode} | Tracking: {n_eff} items")
+        print("-" * 60)
+
+        # 1. RISK ANALYSIS (위험도)
+        # detail(수치)이 있을 때만 괄호를 붙이고, 없으면 이름만!
+        risk_details = [
+            f"{c['feature_name']}({c['detail']})" if c.get('detail') else c['feature_name'] 
+            for c in risk_causes
+        ]
+        print(f" 1. RISK SCORE      : {impulse_score} / 100 ({risk_label})")
+        print(f"    - Top Causes    : {', '.join(risk_details)}")
+        
+        # 2. PREFERENCE ANALYSIS (선호도)
+        # r[1](수치)이 있을 때만 괄호를 붙이고, 없으면 이름만!
+        prior_details = [
+            f"{FEATURE_KO.get(r[0], r[0])}({r[1]})" if r[1] else FEATURE_KO.get(r[0], r[0]) 
+            for r in prior_reasons
+        ]
+        # 퍼스널 데이터가 있을 때만 처리
+        pers_details = [
+            f"{FEATURE_KO.get(r[0], r[0])}({r[1]})" if r[1] else FEATURE_KO.get(r[0], r[0]) 
+            for r in personal_reasons
+        ] if personal_reasons else [""]
+
+        print(f" 2. PREFERENCE SCORE: {total_pref_score} / 100")
+        print(f"    - Alpha Weight  : {alpha:.2f} (Group vs Personal)")
+        print(f"    - Group Reasons : {', '.join(prior_details)}")
+        print(f"    - Pers. Reasons : {', '.join(pers_details)} ({personal_type})")
+        print("-" * 60 + "\n")
+
         return prompt_data
 
     except Exception as e:

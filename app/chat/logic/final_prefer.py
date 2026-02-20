@@ -41,7 +41,6 @@ PERSONAL_SCALE_COLS = ["discount_rate","review_score","review_count","product_li
 # total mix
 N0_ALPHA = 20  # alpha(n)=N0/(N0+n)
 
-
 # =========================
 # Utils
 # =========================
@@ -79,6 +78,17 @@ def normalize_item_schema(item: dict) -> dict:
     x["is_direct_shipping"] = _safe_float(x.get("is_direct_shipping", 0.0), 0.0)
     return x
 
+def format_actual_value(feat_name, actual_val):
+    # 할인율, 리뷰수, 리뷰점수만 수치 표시
+    if feat_name == 'discount_rate': 
+        return f"{int(_safe_float(actual_val))}%"
+    elif feat_name == 'review_count': 
+        return f"{int(_safe_float(actual_val))}개"
+    elif feat_name == 'review_score': 
+        return f"{_safe_float(actual_val)}점"
+    
+    # 나머지는 수치 없이 이름만 나오도록 빈 값 리턴
+    return ""
 
 # =========================
 # PRIOR (고정 아티팩트)
@@ -101,7 +111,7 @@ def _binarize_is_direct_shipping(v):
     return float(_safe_float(v, 0.0) >= 1.0)
 
 def score_prior(item_json: dict, persona_type: str,
-               prior_clf, scaler_cont, meta, ref_item, topk=3):
+               prior_clf, scaler_cont, meta, ref_item, topk=2):
     FEATURE_COLS_ = meta["FEATURE_COLS"]
     SIM_COLS_     = meta["SIM_COLS"]
     ALL_COLS_TRAIN= meta["ALL_COLS_TRAIN"]
@@ -168,10 +178,17 @@ def score_prior(item_json: dict, persona_type: str,
     feat_idx = [MIXED_COL_ORDER.index(c) for c in reason_features]
     contrib_feat = contrib[feat_idx]
     idx_local = np.argsort(contrib_feat)[::-1][:topk]
-    top3 = [(reason_features[i], float(contrib_feat[i])) for i in idx_local]
 
-    return prior_score_100, top3
+    top2_with_actual_data = [] # 변수명도 2로 센스있게!
+    for i in idx_local:
+        feat_name = reason_features[i]
+        actual_val = item_json.get(feat_name, 0)
+        
+        # 🔥 여기서 아까 만든 포맷팅 함수 사용!
+        desc = format_actual_value(feat_name, actual_val)
+        top2_with_actual_data.append((feat_name, desc))
 
+    return prior_score_100, top2_with_actual_data
 
 # =========================
 # PERSONAL (유저별 profile 상태 + 온라인 업데이트)
@@ -284,7 +301,7 @@ def personal_raw_and_contrib(x_vec: np.ndarray, mu_like: np.ndarray, mu_regret: 
     raw      = float(contrib.sum() / max(T, 1e-9))
     return raw, contrib
 
-def score_personal(item_json: dict, profile: dict, topk=3):
+def score_personal(item_json: dict, profile: dict, topk=2):
     item = normalize_item_schema(item_json)
     df_item = pd.DataFrame([item])
 
@@ -298,17 +315,25 @@ def score_personal(item_json: dict, profile: dict, topk=3):
     score01 = float(sigmoid(raw))
     score100 = int(round(score01 * 100))
 
-    # 이유
-    valid_idx = [i for i,f in enumerate(FEATURE_COLS) if f != "platform"]
+    # 이유 추출 (platform 제외)
+    valid_idx = [i for i, f in enumerate(FEATURE_COLS) if f != "platform"]
+    
+    # 점수에 따라 긍정(pos) 또는 위험(rsk) 요인 2개 선정
     idx_pos = sorted(valid_idx, key=lambda i: contrib[i], reverse=True)[:topk]
     idx_rsk = sorted(valid_idx, key=lambda i: contrib[i])[:topk]
 
-    pos_drivers = [(FEATURE_COLS[i], float(contrib[i])) for i in idx_pos]
-    risk_drivers= [(FEATURE_COLS[i], float(contrib[i])) for i in idx_rsk]
+    # 🔥 실제 데이터를 매칭하는 로직 추가
+    def get_drivers_with_data(indices):
+        drivers = []
+        for i in indices:
+            f_name = FEATURE_COLS[i]
+            val = item_json.get(f_name, 0)
+            drivers.append((f_name, format_actual_value(f_name, val)))
+        return drivers
 
     if score100 <= 60:
-        return score100, "risk", risk_drivers
-    return score100, "positive", pos_drivers
+        return score100, "risk", get_drivers_with_data(idx_rsk)
+    return score100, "positive", get_drivers_with_data(idx_pos)
 
 
 # =========================
@@ -319,23 +344,23 @@ def infer_all(item_json: dict, persona_type: str,
              profile: dict = None):
     # prior
     prior_clf, scaler_cont, meta, ref_item = load_prior_artifacts(prior_dir)
-    prior_score, prior_top3 = score_prior(
+    prior_score, prior_top2 = score_prior(
         item_json=item_json,
         persona_type=persona_type,
         prior_clf=prior_clf,
         scaler_cont=scaler_cont,
         meta=meta,
         ref_item=ref_item,
-        topk=3
+        topk=2
     )
 
-    # personal (profile 없으면 personal은 prior만 반영되게 처리)
     if profile is None or profile_n_effective(profile) == 0:
-        personal_score, personal_reason_type, personal_top3 = 50, "neutral", []
+        personal_score, personal_reason_type, personal_top2 = 50, "neutral", []
         n_eff = 0
         a = 1.0
     else:
-        personal_score, personal_reason_type, personal_top3 = score_personal(item_json, profile, topk=3)
+        # personal 호출 시 topk=2로 변경
+        personal_score, personal_reason_type, personal_top2 = score_personal(item_json, profile, topk=2) # 👈 3에서 2로 수정
         n_eff = profile_n_effective(profile)
         a = alpha_n(n_eff, N0_ALPHA)
 
@@ -343,10 +368,10 @@ def infer_all(item_json: dict, persona_type: str,
 
     return {
         "prior_score": prior_score,
-        "prior_reason_top3": prior_top3,
+        "prior_reason_top2": prior_top2, # 키 이름도 2로 맞춰주면 깔끔!
         "personal_score": personal_score,
-        "personal_reason_type": personal_reason_type,  # positive/risk/neutral
-        "personal_reason_top3": personal_top3,
+        "personal_reason_type": personal_reason_type,
+        "personal_reason_top2": personal_top2, # 키 이름도 2로 수정
         "alpha": float(a),
         "n_effective": int(n_eff),
         "total_score": total
