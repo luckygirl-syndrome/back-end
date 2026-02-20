@@ -101,47 +101,68 @@ from app.products.models import Product, UserProduct # 모델 경로 확인
 import json
 from app.chat.logic.impulse_calculator import analyze_product_risk # 아까 만든 로직 임포트
 
+# 로직 임포트
+from app.chat.logic.impulse_calculator import analyze_product_risk
+from app.chat.logic.final_prefer import infer_all # 👈 선호도 로직 추가
+import os
+import datetime
+import json
+from sqlalchemy.orm import Session
+from app.products.parsers.item_parser import extract_features_from_url
+from app.products.models import Product, UserProduct
+
+# 모델 아티팩트 경로 (절대 경로 추천)
+PRIOR_MODEL_DIR = "/Users/nau/Documents/GitHub/Back-end/models/artifacts_prior/"
+
 def parse_and_save_product(db: Session, url: str, user: User):
     try:
-        # 1. 유저 정보 추출 (코드 정제)
+        # 1. 유저 페르소나 코드 추출 (SDM, DAM 등)
         user_id = user.user_id
         persona_obj = getattr(user, 'persona_type', None)
-
-        # ✅ 유저 페르소나 객체에서 "SDM" 같은 3글자 코드만 쏙 뽑아내기
         if isinstance(persona_obj, dict):
             user_persona_code = persona_obj.get("persona_type", "D-S-T")
-        elif hasattr(persona_obj, 'persona_type'):
-            user_persona_code = persona_obj.persona_type
         else:
-            try:
-                # 만약 문자열(JSON) 형태로 들어온 경우 파싱
-                import json
-                data = json.loads(persona_obj)
-                user_persona_code = data.get("persona_type", "D-S-T")
-            except:
-                # 최후의 보루: 문자열에서 앞 3글자만 가져오기
-                user_persona_code = str(persona_obj)[:3] if persona_obj else "D-S-T"
+            user_persona_code = str(persona_obj)[:3] if persona_obj else "D-S-T"
 
-        print(f"🧐 분석 시작 - 유저: {user_id}, 최종 페르소나 코드: {user_persona_code}")
-        
-        # 2. 크롤링 및 분석 수행
+        # 2. 크롤링 수행
         result = extract_features_from_url(url)
-        if not result:
-            print("❌ 분석 결과가 없습니다.")
-            return
+        if not result or result.get("product_name") == "Error":
+            return None
 
-        # [Step 1] 위험도 분석 로직 실행 (정제된 코드 "SDM" 등 전달)
-        # ✅ persona_obj 대신 user_persona_code를 넣으세요!
+        # ---------------------------------------------------------
+        # [Step 1] 위험도 분석 (Impulse) -> 대화 모드(Brake/Decider) 결정용
+        # ---------------------------------------------------------
         risk_analysis = analyze_product_risk(result, user_persona_code)
+        impulse_score = int(risk_analysis.get('total_score', 0))
 
-        # [Step 2] products 테이블 저장 (UnboundLocalError 방지 로직)
-        product_name = result.get('product_name', '이름 없는 상품')
-        
-        # ✅ 필독: 여기서 먼저 조회를 해서 product 변수를 확실히 만듭니다.
-        product = db.query(Product).filter(Product.product_name == product_name).first()
-        
+        # ---------------------------------------------------------
+        # [Step 2] 선호도 분석 (Preference) -> 대화의 근거/공감용
+        # ---------------------------------------------------------
+        pref_item_input = {
+            "discount_rate": float(result.get('discount_rate', 0)),
+            "review_score": float(result.get('rating', 0)),
+            "review_count": int(result.get('review_count', 0)),
+            "product_likes": int(result.get('product_likes', 0)),
+            "platform": result.get('platform', 'Unknown'),
+            "is_direct_shipping": 1.0 if result.get('is_direct_shipping') else 0.0,
+            "free_shipping": 1.0 if result.get('free_shipping') else 0.0,
+            "sim_quality_logic": int(result.get('sim_quality_logic', 0)),
+            "sim_trend_hype": int(result.get('sim_trend_hype', 0)),
+            "sim_temptation": int(result.get('sim_temptation', 0)),
+            "sim_fit_anxiety": int(result.get('sim_fit_anxiety', 0)),
+            "sim_bundle": int(result.get('sim_bundle', 0)),
+            "sim_confidence": int(result.get('sim_confidence', 0))
+        }
+
+        # [Step 2] 선호도 분석 (Preference)
+        pref_out = infer_all(item_json=pref_item_input, persona_type=user_persona_code, prior_dir=PRIOR_MODEL_DIR)
+        total_pref_score = int(pref_out['total_score']) # 👈 이게 선호도
+
+        # ---------------------------------------------------------
+        # [Step 3] DB 저장
+        # ---------------------------------------------------------
+        product = db.query(Product).filter(Product.product_name == result['product_name']).first()
         if not product:
-            print(f"🆕 새 상품 등록: {product_name}")
             product = Product(
                 product_name=product_name,
                 platform=result.get('platform', 'Unknown'),
@@ -153,7 +174,7 @@ def parse_and_save_product(db: Session, url: str, user: User):
                 review_count=int(result.get('review_count', 0)),
                 review_score=float(result.get('rating', 0)),
                 product_likes=str(result.get('product_likes', '0')),
-                # ✅ ㅇㅇ핏 등 심리 축 저장 (KeywordAxisInfer 결과)
+                preference_score=total_pref_score,
                 sim_temptation=result.get('sim_temptation', 0),
                 sim_trend_hype=result.get('sim_trend_hype', 0),
                 sim_fit_anxiety=result.get('sim_fit_anxiety', 0),
@@ -163,36 +184,70 @@ def parse_and_save_product(db: Session, url: str, user: User):
                 created_at=datetime.datetime.now()
             )
             db.add(product)
-            db.flush() # ID를 즉시 생성
-        else:
-            print(f"♻️ 기존 상품 정보 활용: {product_name}")
+            db.flush()
 
-        # [Step 3] user_product 연결 테이블 생성
         user_prod_entry = UserProduct(
             user_id=user_id,
             product_id=product.product_id,
-            requested_at=datetime.datetime.now(),
-            
-            # ✅ 작업 완료 시점이므로 현재 시간 기록
-            completed_at=datetime.datetime.now(), 
-            
-            # ✅ 모델의 필드명 risk_score_1에 점수 저장
-            risk_score_1=int(risk_analysis.get('total_score', 0)),
-            
-            # ✅ 유저의 페르소나 코드(SDM 등)를 user_type에 기록 (나중에 분석용)
-            user_type=user_persona_code, 
-            
+            user_type=user_persona_code,
+            risk_score_1=impulse_score,    # 위험도 (Brake 수위)
+            risk_score_2=total_pref_score, # 선호도 (공감/설득 근거)
             status="COMPLETED",
-            is_purchased=0, # 기본값: 미구매
-            created_at=datetime.datetime.now(),
-            updated_at=datetime.datetime.now()
+            created_at=datetime.datetime.now()
         )
-        
         db.add(user_prod_entry)
         db.commit()
+
+        # ---------------------------------------------------------
+        # [Step 4] 프롬프트 빌더용 데이터 구성 (핵심!)
+        # ---------------------------------------------------------
+        # 위험도에 따른 모드 결정 (70점 이상이면 강력 제동)
+        current_mode = "BRAKE" if impulse_score >= 50 else "DECIDER"
         
-        print(f"✅ [Background] 최종 저장 성공! (상품ID: {product.product_id}, 점수: {risk_analysis.get('total_score')}점)")
+        prompt_data = {
+            "user_context": {
+                "persona_type": user_persona_code,
+                "target_style": getattr(user, 'target_style', '심플/캐주얼')
+            },
+            "product_context": {
+                "name": product.product_name,
+                "price": product.price,
+                "brand": result.get('brand', 'Unknown')
+            },
+            "mode_block": {"current_mode": current_mode},
+            "impulse_block": {
+                "impulse_score": impulse_score,
+                # 위험 요소 상위 2개 추출
+                "impulse_reason_top2": [
+                    {"feature_key": r[0], "guide": "위험 요인"} for r in risk_analysis.get('top_reasons', [])[:2]
+                ]
+            },
+            "preference_block": {
+                "total_score": total_pref_score,
+                "personal_score": pref_out['personal_score'],
+                "preference_priority": pref_out['alpha'] < 0.5 and "personal" or "prior",
+                # 선호 요소 상위 2개 추출 (prior_reason_top3 활용)
+                "prior_reason_top2": [
+                    {"feature_key": r[0], "guide": "유저 그룹 선호 요인"} for r in pref_out['prior_reason_top3'][:2]
+                ],
+                "personal_reason_top2": [
+                    {"feature_key": r[0], "guide": "유저 개인 취향 일치"} for r in pref_out['personal_reason_top3'][:2]
+                ]
+            },
+            "conversation_block": {
+                "cart_duration": "방금 막",
+                "key_appeal": result.get('key_appeal', '디자인/핏')
+            },
+            "strategy_matrix": {
+                "goal": current_mode == "BRAKE" and "충동 억제" or "구매 확신",
+                "strategy": "위험도와 선호도를 교차 분석하여 대응"
+            }
+        }
+
+        print(f"✅ 분석 및 저장 완료 (Risk: {impulse_score}, Prefer: {total_pref_score})")
+        return prompt_data
 
     except Exception as e:
         db.rollback()
-        print(f"❌ [Background] DB 작업 중 진짜 에러 발생: {str(e)}")
+        print(f"❌ 에러 발생: {e}")
+        return None

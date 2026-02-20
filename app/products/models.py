@@ -46,6 +46,7 @@ class UserProduct(Base):
     user_type = Column(String(50))
     risk_score_1 = Column(Integer)
     risk_score_2 = Column(Integer)
+    preference_score = Column(Integer, default=50)
     is_purchased = Column(TINYINT(1))
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
