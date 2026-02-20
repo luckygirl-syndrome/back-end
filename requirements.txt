@@ -1,0 +1,20 @@
+# 1. API 서버 (FastAPI)
+fastapi
+uvicorn[standard]
+
+# 2. 데이터베이스 (TiDB/MySQL)
+sqlalchemy
+pymysql
+cryptography
+
+# 3. 구글 제미나이 AI (Google AI)
+google-generativeai
+
+# 4. 환경 변수 및 유틸리티
+python-dotenv
+pydantic
+requests
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+\
