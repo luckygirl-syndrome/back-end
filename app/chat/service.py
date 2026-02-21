@@ -26,10 +26,17 @@ redis_client = redis.Redis(
     decode_responses=True  # 이걸 해야 문자열로 바로 읽어와!
 )
 
-# --- 상단 전역 설정 ---
-# 1. 현재 파일(service.py)의 위치를 기준으로 프로젝트 루트 폴더 찾기
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 1. 현재 파일(service.py) 위치: app/chat/service.py
+# 2. abspath(__file__) -> /home/ubuntu/Back-end/app/chat/service.py
+# 3. 3번 올라가야 /home/ubuntu/Back-end/ (루트)가 나옴
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 4. 이제 모델 폴더 위치를 지정
+# 만약 모델 폴더가 Back-end/models/artifacts_prior 라면:
 PRIOR_MODEL_DIR = os.path.join(BASE_DIR, "models", "artifacts_prior")
+
+# 5. (선택) 제대로 잡혔는지 터미널에 찍어보기 (서버 로그 확인용)
+print(f"🚀 DEBUG: PRIOR_MODEL_DIR is -> {PRIOR_MODEL_DIR}")
 
 # 챗봇 설명용 한글 매핑
 FEATURE_KO = {
