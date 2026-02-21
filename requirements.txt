@@ -17,4 +17,10 @@ requests
 python-multipart
 python-jose[cryptography]
 passlib[bcrypt]
-\
+redis
+torch
+transformers
+sentence-transformers
+scikit-learn
+joblib
+beautifulsoup4
