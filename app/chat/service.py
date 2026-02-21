@@ -27,7 +27,9 @@ redis_client = redis.Redis(
 )
 
 # --- 상단 전역 설정 ---
-PRIOR_MODEL_DIR = "/Users/nau/Documents/GitHub/Back-end/models/artifacts_prior/"
+# 1. 현재 파일(service.py)의 위치를 기준으로 프로젝트 루트 폴더 찾기
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PRIOR_MODEL_DIR = os.path.join(BASE_DIR, "models", "artifacts_prior")
 
 # 챗봇 설명용 한글 매핑
 FEATURE_KO = {
