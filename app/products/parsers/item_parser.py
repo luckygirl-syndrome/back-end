@@ -14,13 +14,18 @@ from webdriver_manager.chrome import ChromeDriverManager
 from transformers import AutoTokenizer, AutoModel
 from .model_utils import KeywordAxisInfer
 import traceback
-from .base_scapper import BaseScraper
 
 # --- 3. Platform Scrapers ---
 
-class MusinsaPerfectScraper(BaseScraper):
+class MusinsaPerfectScraper:
     def __init__(self):
-        super().__init__()  # 부모의 __init__ (크롬 설정)을 그대로 가져옴
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
     def run(self, url):
         # 🛡️ 1. try 문 밖에서 가장 먼저 빈 바구니를 만듭니다. (에러 방지용)
@@ -89,9 +94,14 @@ class MusinsaPerfectScraper(BaseScraper):
     def close(self):
         self.driver.quit()
 
-class ZigzagDetailCrawler(BaseScraper):
+class ZigzagDetailCrawler:
     def __init__(self):
-        super().__init__()  # 부모의 __init__ (크롬 설정)을 그대로 가져옴
+        self.chrome_options = Options()
+        self.chrome_options.add_argument('--headless')
+        self.chrome_options.add_argument('--no-sandbox')
+        self.chrome_options.add_argument('--disable-dev-shm-usage')
+        self.chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
 
     def _expand_product_info(self):
         try:
@@ -196,9 +206,25 @@ class ZigzagDetailCrawler(BaseScraper):
     def close(self):
         self.driver.quit()
 
-class AblyDetailCrawler(BaseScraper):
+class AblyDetailCrawler:
     def __init__(self):
-        super().__init__()  # 부모의 __init__ (크롬 설정)을 그대로 가져옴
+        self.chrome_options = Options()
+        self.chrome_options.add_argument('--headless')
+        self.chrome_options.add_argument('--no-sandbox')
+        self.chrome_options.add_argument('--disable-dev-shm-usage')
+        self.chrome_options.add_argument('--disable-gpu')
+        
+        # 🚩 봇 감지 우회 핵심 설정
+        self.chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        self.chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        self.chrome_options.add_experimental_option('useAutomationExtension', False)
+        
+        # 최신 아이폰 유저 에이전트
+        self.chrome_options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
+        
+        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
+        # 🚩 봇 감지 우회 자바스크립트 실행
+        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
     def crawl_detail(self, url):
         data = {
@@ -334,35 +360,27 @@ class AblyDetailCrawler(BaseScraper):
 def crawl_product_data(url, platform):
     print(f"Crawling {url} on {platform}...")
     data = {}
-
-    # 🚩 1. 먼저 플랫폼에 맞는 스크래퍼 객체를 생성 (이때 드라이버가 켜짐)
+    
     if platform == "musinsa":
-        scraper = MusinsaPerfectScraper()
+        crawler = MusinsaPerfectScraper()
+        try:
+            data = crawler.run(url)
+        finally:
+            crawler.close()
     elif platform == "zigzag":
-        scraper = ZigzagDetailCrawler()
+        crawler = ZigzagDetailCrawler()
+        try:
+            data = crawler.crawl_detail(url)
+        finally:
+            crawler.close()
     elif platform == "ably":
-        scraper = AblyDetailCrawler()
+        crawler = AblyDetailCrawler()
+        try:
+            data = crawler.crawl_detail(url)
+        finally:
+            crawler.close() 
     else:
         return {}
-
-    try:
-        # 🚩 2. [서버 디버깅] 객체 안에 있는 driver를 사용해서 스크린샷 찍기
-        scraper.driver.get(url)
-        time.sleep(5) 
-        scraper.driver.save_screenshot('server_view.png') 
-        print(f"📸 {platform} 서버 화면 저장 완료")
-
-        # 🚩 3. 실제 데이터 긁어오기
-        if platform == "musinsa":
-            data = scraper.run(url)
-        elif platform == "zigzag":
-            data = scraper.crawl_detail(url)
-        elif platform == "ably":
-            data = scraper.crawl_detail(url)
-            
-    finally:
-        # 🚩 4. 다 썼으면 꼭 닫아주기 (안 닫으면 서버 메모리 터져!)
-        scraper.close()
 
     # Normalize Data
     normalized_data = {}
