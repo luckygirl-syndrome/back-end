@@ -12,131 +12,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from transformers import AutoTokenizer, AutoModel
-
-def mean_pool(last_hidden_state, attention_mask):
-    mask = attention_mask.unsqueeze(-1).type_as(last_hidden_state)
-    summed = (last_hidden_state * mask).sum(dim=1)
-    counts = mask.sum(dim=1).clamp(min=1e-9)
-    return summed / counts
-
-class StudentDistillModel(nn.Module):
-    def __init__(self, encoder, hidden_size, out_dim=6, dropout=0.1):
-        super().__init__()
-        self.encoder = encoder
-        self.dropout = nn.Dropout(dropout)
-        self.head = nn.Linear(hidden_size, out_dim)
-
-    def forward(self, input_ids, attention_mask):
-        out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-        pooled = mean_pool(out.last_hidden_state, attention_mask)
-        pooled = F.normalize(pooled, p=2, dim=-1)
-        pooled = self.dropout(pooled)
-        scores = self.head(pooled)
-        return scores
-
-def load_runtime_config(model_dir: str):
-    cfg_path = os.path.join(model_dir, "config_runtime.json")
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def apply_rules(text: str, AXES, RULES):
-    t = str(text).lower()
-    scores = np.zeros(len(AXES), dtype=np.float32)
-    for j, ax in enumerate(AXES):
-        for kw in RULES.get(ax, []):
-            target = str(kw).lower()
-
-            # 울 예외: "겨울" 포함된 문맥은 울 무시
-            if target == "울":
-                clean = t.replace("겨울", " ")
-                if "울" in clean:
-                    if ax == "quality_logic":
-                        scores[j] = 1.0
-                    break
-                else:
-                    continue
-
-            if target in t:
-                scores[j] = 1.0
-                break
-    return scores
-
-class KeywordAxisInfer:
-    def __init__(self, model_dir: str, device: str | None = None):
-        self.model_dir = model_dir
-        self.cfg = load_runtime_config(model_dir)
-
-        self.AXES = self.cfg["AXES"]
-        self.THRESHOLDS = self.cfg["THRESHOLDS"]
-        self.RULES = self.cfg["RULES"]
-        self.rule_weight = float(self.cfg.get("rule_weight", 1.2))
-        self.max_len = int(self.cfg.get("max_len", 128))
-        dropout = float(self.cfg.get("dropout", 0.0))
-
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = torch.device(device)
-
-        base_name = self.cfg.get("STUDENT_NAME", "intfloat/multilingual-e5-base")
-
-        # ✅ tokenizer/encoder 둘 다 base_name에서 로드
-        self.tokenizer = AutoTokenizer.from_pretrained(base_name)
-        self.encoder = AutoModel.from_pretrained(base_name).to(self.device)
-
-        hidden = self.encoder.config.hidden_size
-        self.student = StudentDistillModel(
-            self.encoder, hidden_size=hidden, out_dim=len(self.AXES), dropout=dropout
-        ).to(self.device)
-
-        head_path = os.path.join(model_dir, "student_head.pt")
-        state = torch.load(head_path, map_location=self.device)
-
-        # ✅ head만 로드 (저장 형태 2가지 모두 대응)
-        # 1) {"weight":..., "bias":...}
-        if "weight" in state and "bias" in state:
-            self.student.head.load_state_dict(state, strict=True)
-        # 2) {"head.weight":..., "head.bias":...} 혹은 전체 state_dict
-        else:
-            # head.* 만 추출해서 로드 시도
-            head_state = {k.replace("head.", ""): v for k, v in state.items() if k.startswith("head.")}
-            if head_state:
-                self.student.head.load_state_dict(head_state, strict=True)
-            else:
-                # 마지막 수단: 전체 로드(학습 때 전체 저장했으면 여기서 성공)
-                self.student.load_state_dict(state, strict=False)
-
-        self.student.eval()
-
-    @torch.no_grad()
-    def predict_scores(self, texts, batch_size: int = 128):
-        outs = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i+batch_size]
-            enc = self.tokenizer(
-                batch,
-                padding=True,
-                truncation=True,
-                max_length=self.max_len,
-                return_tensors="pt"
-            )
-            input_ids = enc["input_ids"].to(self.device)
-            attn = enc["attention_mask"].to(self.device)
-
-            s = self.student(input_ids, attn)  # (B,6)
-            outs.append(s.detach().cpu().numpy())
-        return np.vstack(outs).astype(np.float32)
-
-    def infer(self, texts, batch_size: int = 128):
-        student_scores = self.predict_scores(texts, batch_size=batch_size)
-        rule_scores = np.vstack([apply_rules(t, self.AXES, self.RULES) for t in texts])
-
-        final_scores = student_scores + self.rule_weight * rule_scores
-
-        final_labels = np.zeros_like(final_scores, dtype=np.int32)
-        for j, ax in enumerate(self.AXES):
-            final_labels[:, j] = (final_scores[:, j] >= float(self.THRESHOLDS[ax])).astype(np.int32)
-
-        return final_scores, final_labels
+from .model_utils import KeywordAxisInfer
+import traceback
 
 # --- 3. Platform Scrapers ---
 
@@ -146,103 +23,267 @@ class MusinsaPerfectScraper:
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
     def run(self, url):
+        # 🛡️ 1. try 문 밖에서 가장 먼저 빈 바구니를 만듭니다. (에러 방지용)
+        self.result = {
+            'product_img': "", 'profile_img': "", 'product_name': "Unknown", 
+            'brand': "Unknown", 'category': "Unknown", 'discounted_price': 0,
+            'review_score': "0", 'review_count': "0", 'discount_rate': "0",
+            'is_direct_shipping': 0, 'product_likes': "0"
+        }
+
         try:
+            print("📍 [Step 1] 브라우저 실행 중...")
             self.driver.get(url)
+            print("📍 [Step 2] 페이지 접속 완료, 대기 중...")
             wait = WebDriverWait(self.driver, 15)
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[class*='FixedArea__Inner']")))
-            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-            fixed = soup.select_one("div[class*='FixedArea__Inner']")
-            if not fixed: return {}
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
             
-            return {
-                'product_name': fixed.select_one('span[class*="GoodsName"]').get_text(strip=True) if fixed.select_one('span[class*="GoodsName"]') else "Unknown",
-                'discount_rate': fixed.select_one('span[class*="Price__DiscountRate"]').get_text(strip=True) if fixed.select_one('span[class*="Price__DiscountRate"]') else "0",
-                'rating': fixed.select_one('div[class*="ReviewSummary__Wrap"] span[class*="text-body"]').get_text(strip=True) if fixed.select_one('div[class*="ReviewSummary__Wrap"]') else "0",
-                'review_count': fixed.select_one('div[class*="ReviewSummary__Wrap"] span[class*="underline"]').get_text(strip=True) if fixed.select_one('div[class*="ReviewSummary__Wrap"]') else "0",
-                'product_likes': fixed.select_one('div[class*="Like__Container"] span').get_text(strip=True) if fixed.select_one('div[class*="Like__Container"]') else "0"
-            }
+            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+            
+            # 1. 이미지 추출 (순서: 메타 태그 -> 클래스 백업) ✅
+            og_image = soup.find("meta", property="og:image")
+            if og_image and og_image.get("content"):
+                self.result['product_img'] = og_image["content"]
+            
+            # 2. 고정 영역 데이터 파싱
+            fixed = soup.select_one("div[class*='FixedArea__Inner']")
+            if fixed:
+                # 이미지가 아직 비어있을 때만 클래스로 재시도
+                if not self.result['product_img']:
+                    img_tag = fixed.select_one('div[class*="Thumbnail"] img')
+                    self.result['product_img'] = img_tag['src'] if img_tag else ""
+
+                # 브랜드 로고(profile_img) 추가 ✅
+                logo_tag = fixed.select_one('div[class*="Brand__BrandLogo"] img')
+                self.result['profile_img'] = logo_tag['src'] if logo_tag else ""
+
+                # 기본 정보
+                self.result['category'] = " > ".join([a.get_text(strip=True) for a in fixed.select('div[class*="Category__Wrap"] a')])
+                self.result['brand'] = self._text(fixed, 'span[class*="Brand__BrandName"]')
+                self.result['product_name'] = self._text(fixed, 'span[class*="GoodsName"]')
+
+                # 리뷰 및 가격
+                self.result['review_score'] = self._text(fixed, 'div[class*="ReviewSummary__Wrap"] span[class*="text-body"]')
+                self.result['review_count'] = self._text(fixed, 'div[class*="ReviewSummary__Wrap"] span[class*="underline"]')
+                self.result['discount_rate'] = self._text(fixed, 'span[class*="Price__DiscountRate"]')
+                
+                sale_text = self._text(fixed, 'span[class*="Price__CalculatedPrice"]')
+                self.result['discounted_price'] = int(re.sub(r'[^0-9]', '', sale_text)) if sale_text else 0
+                
+                # 배송 정보 및 좋아요
+                arrival = fixed.select_one('div[class*="PlusDeliveryArrivalInfo__Wrapper"]')
+                shipping_info = arrival.get_text(" ", strip=True) if arrival else ""
+                self.result['is_direct_shipping'] = 1 if any(x in shipping_info for x in ["플러스배송", "도착 보장"]) else 0
+                self.result['product_likes'] = self._text(fixed, 'div[class*="Like__Container"] span')
+
+            return self.result
         except Exception as e:
-            print(f"Musinsa Error: {e}")
-            return {}
-        finally:
-            self.driver.quit()
+            print(f"❌ Musinsa Error: {e}")
+            return self.result
+
+    def _text(self, parent, selector):
+        tag = parent.select_one(selector)
+        return tag.get_text(strip=True) if tag else ""
+
+    def close(self):
+        self.driver.quit()
 
 class ZigzagDetailCrawler:
     def __init__(self):
-        options = Options()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        self.chrome_options = Options()
+        self.chrome_options.add_argument('--headless')
+        self.chrome_options.add_argument('--no-sandbox')
+        self.chrome_options.add_argument('--disable-dev-shm-usage')
+        self.chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
+
+    def _expand_product_info(self):
+        try:
+            more_button = WebDriverWait(self.driver, 3).until(
+                EC.presence_of_element_located((By.XPATH, "//button[contains(., '상품정보 더 보기')]"))
+            )
+            self.driver.execute_script("arguments[0].click();", more_button)
+            time.sleep(2)
+        except Exception:
+            pass
+
+    def _safe_get_text(self, soup, selector):
+        element = soup.select_one(selector)
+        return element.get_text(strip=True) if element else None
 
     def crawl_detail(self, url):
-        try:
-            self.driver.get(url)
-            time.sleep(3)
-            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-            return {
-                'product_name': soup.select_one('div.pdp__title h1').get_text(strip=True) if soup.select_one('div.pdp__title h1') else "Unknown",
-                'discount_rate': soup.select_one('div[class*="css-1fwo2a0"]').get_text(strip=True) if soup.select_one('div[class*="css-1fwo2a0"]') else "0",
-                'rating': soup.select_one('span[class*="eic0mh2"]').get_text(strip=True) if soup.select_one('span[class*="eic0mh2"]') else "0",
-                'review_count': soup.select_one('span[class*="zds4_lh8eqt5"]').get_text(strip=True) if soup.select_one('span[class*="zds4_lh8eqt5"]') else "0"
-            }
-        except Exception as e:
-            print(f"Zigzag Error: {e}")
-            return {}
-        finally:
-            self.driver.quit()
+        self.driver.get(url)
+        time.sleep(3)
+        self._expand_product_info()
+        soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+        data = {}
 
-def crawl_ably(url):
-    options = Options()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    # 에이블리는 봇 차단이 심해서 유저 에이전트 설정이 중요해!
-    options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1")
-    
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    try:
-        driver.get(url)
-        # 페이지 로딩 대기 (최대 10초)
-        wait = WebDriverWait(driver, 10)
-        
-        # 제목이 나타날 때까지 기다리기
-        try:
-            title_el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'h2, .typography__body1')))
-            product_name = title_el.text
-        except:
-            product_name = "제목 추출 실패"
+        og_image = soup.find("meta", property="og:image")
+        data['product_img'] = og_image["content"] if og_image else ""
 
-        page_text = driver.find_element(By.TAG_NAME, "body").text
+        data['product_name'] = self._safe_get_text(soup, 'div.pdp__title h1')
+        data['discount_rate'] = self._safe_get_text(soup, 'div[class*="css-1fwo2a0"]')
         
-        # 데이터 정리
-        product_data = {
-            'product_name': product_name,
-            'discount_rate': "0", # 기본값
-            'review_count': "0",
-            'is_direct_shipping': 1 if '오늘출발' in page_text else 0
+        benefit_price_box = soup.select_one('div[class*="css-1ig1bns"] div[class*="e1sus6ys1"]')
+        normal_price_box = soup.select_one('div[class*="css-vogdud"] div[class*="e1sus6ys1"]')
+        target_price_element = benefit_price_box if benefit_price_box else normal_price_box
+        if target_price_element:
+            sale_text = target_price_element.get_text(strip=True)
+            data['discounted_price'] = int(re.sub(r'[^0-9]', '', sale_text))
+        else:
+            data['discounted_price'] = 0
+
+        # 브랜드명 및 카테고리 추출 시도
+        data['brand'] = self._safe_get_text(soup, 'h2[class*="e1qy47wz6"]') # 스토어명을 브랜드로 매핑
+        cats = [a.get_text(strip=True) for a in soup.select('div[class*="breadcrumb"] a, a[class*="breadcrumb"]')]
+        data['category'] = " > ".join(cats) if cats else "Unknown"
+
+        is_zdelivery = soup.select_one('svg[data-zds-graphic="LogoZdelivery"]')
+        data['is_direct_shipping'] = 1 if is_zdelivery else 0
+        
+        data['review_score'] = self._safe_get_text(soup, 'span[class*="eic0mh2"]')
+        data['review_count'] = self._safe_get_text(soup, 'span[class*="zds4_lh8eqt5"]')
+        
+        # 조회수 기반 임시 좋아요 대용
+        view_text = self._safe_get_text(soup, 'div[class*="css-hjgjo9"]')
+        if view_text:
+            numbers = re.sub(r'[^0-9]', '', view_text)
+            data['product_likes'] = numbers if numbers else "0"
+        else:
+            data['product_likes'] = "0"
+            
+        return data
+
+    def close(self):
+        self.driver.quit()
+
+class AblyDetailCrawler:
+    def __init__(self):
+        self.chrome_options = Options()
+        self.chrome_options.add_argument('--headless')
+        self.chrome_options.add_argument('--no-sandbox')
+        self.chrome_options.add_argument('--disable-dev-shm-usage')
+        self.chrome_options.add_argument('--disable-gpu')
+        # 에이블리는 모바일 에이전트가 제일 정확해
+        self.chrome_options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1")
+        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
+
+    def crawl_detail(self, url):
+        # 1. 초기 바구니 설정
+        data = {
+            'product_name': "Unknown", 'brand': "Unknown", 'category': "Unknown",
+            'product_img': "", 'profile_img': "",
+            'discounted_price': 0, 'discount_rate': "0",
+            'review_count': 0, 'review_score': 0.0,
+            'product_likes': "0", 'is_direct_shipping': 0
         }
 
-        # 할인율 추출 (있을 경우만)
-        price_elements = driver.find_elements(By.CLASS_NAME, "color__pink30")
-        if price_elements:
-            product_data['discount_rate'] = price_elements[0].text
+        try:
+            self.driver.get(url)
+            time.sleep(5)
+            
+            # 스크롤 로직 (Lazy 로딩 대응)
+            for scroll in [1000, 2000]:
+                self.driver.execute_script(f"window.scrollTo(0, {scroll});")
+                time.sleep(1)
 
-        # 리뷰 수 추출
-        count_match = re.search(r'리뷰\s*([\d,]+)개', page_text)
-        if count_match:
-            product_data['review_count'] = count_match.group(1)
+            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
 
-        return product_data
+            # 2. 이미지 & 제목 (메타 태그)
+            og_image = soup.find("meta", property="og:image")
+            data['product_img'] = og_image["content"] if og_image else ""
+            
+            og_title = soup.find("meta", property="og:title")
+            data['product_name'] = og_title["content"] if og_title else "제목 없음"
 
-    except Exception as e:
-        print(f"Ably Parsing Error: {e}")
-        return {} # 에러 나면 빈 딕셔너리 반환해서 500 에러 방지
-    finally:
-        driver.quit()
+            # 3. 브랜드 & 가격 & 리뷰 (텍스트 및 셀렉터 혼합)
+            page_text = self.driver.find_element(By.TAG_NAME, "body").text
+            
+            # 가격 필살기
+            price_matches = re.findall(r'([\d,]+)원', page_text)
+            if price_matches:
+                data['discounted_price'] = int(price_matches[0].replace(',', ''))
+
+            # 브랜드명
+            try:
+                market_el = self.driver.find_element(By.CSS_SELECTOR, 'a[href*="/market/"] span, [class*="MarketName"]')
+                data['brand'] = market_el.text.strip()
+            except:
+                desc = soup.find("meta", property="og:description")
+                if desc: data['brand'] = desc['content'].split(' ')[0]
+
+            # 배송 정보
+            data['is_direct_shipping'] = 1 if '오늘출발' in page_text else 0
+
+            return data
+
+        except Exception as e:
+            print(f"❌ Ably Crawler Error: {e}")
+            return data
+
+    def close(self):
+        self.driver.quit()
+
+def crawl_product_data(url, platform):
+    print(f"Crawling {url} on {platform}...")
+    data = {}
+    
+    if platform == "musinsa":
+        crawler = MusinsaPerfectScraper()
+        try:
+            data = crawler.run(url)
+        finally:
+            crawler.close()
+    elif platform == "zigzag":
+        crawler = ZigzagDetailCrawler()
+        try:
+            data = crawler.crawl_detail(url)
+        finally:
+            crawler.close()
+    elif platform == "ably":
+        crawler = AblyDetailCrawler()
+        try:
+            data = crawler.crawl_detail(url)
+        finally:
+            crawler.close() 
+    else:
+        return {}
+
+    # Normalize Data
+    normalized_data = {}
+    normalized_data["product_img"] = data.get("product_img", "")
+    normalized_data["platform"] = platform
+    normalized_data["category"] = data.get("category", "Unknown")
+    normalized_data["brand"] = data.get("brand", "Unknown")
+    normalized_data["product_name"] = data.get("product_name", "Unknown")
+    normalized_data["discounted_price"] = int(data.get("discounted_price", 0))
+
+    dr = data.get("discount_rate", "0")
+    if isinstance(dr, str): dr = re.sub(r'[^0-9]', '', dr)
+    normalized_data["discount_rate"] = int(dr) if dr else 0
+    
+    rs = data.get("review_score", "0")
+    if isinstance(rs, str): rs = re.sub(r'[^0-9.]', '', rs)
+    normalized_data["review_score"] = float(rs) if rs else 0.0
+    
+    rc = data.get("review_count", "0")
+    if isinstance(rc, str): rc = re.sub(r'[^0-9]', '', rc)
+    normalized_data["review_count"] = int(rc) if rc else 0
+    
+    likes = data.get("product_likes", "0")
+    if isinstance(likes, str):
+        if '만' in likes: likes = str(int(float(likes.replace('만', '')) * 10000))
+        likes = re.sub(r'[^0-9]', '', likes)
+    normalized_data["product_likes"] = int(likes) if likes else 0
+    
+    normalized_data["is_direct_shipping"] = int(data.get("is_direct_shipping", 0))
+    
+    return normalized_data
 
 # --- 4. Core Parsing & Integration ---
 
@@ -263,65 +304,46 @@ def detect_platform(url):
 # 전역 변수로 모델 선언
 _INFER_MODEL = None
 
-def extract_features_from_url(url): # ✅ model_path 인자를 아예 제거하거나 안 쓰게 수정
+def extract_features_from_url(url):
     global _INFER_MODEL
-    
-    # 1. 모델 경로 설정 (고정)
     model_dir = "./student_distilled_e5_rule"
     
     try:
-        # 1. 모델 로드 (없을 때만 딱 한 번 실행)
+        # 1. 모델 싱글톤 로드 (최초 1회)
         if _INFER_MODEL is None:
             if os.path.exists(model_dir):
-                print("🚀 전역 모델을 처음 로드합니다...")
                 _INFER_MODEL = KeywordAxisInfer(model_dir=model_dir)
-            else:
-                print(f"⚠️ 모델 경로 없음: {model_dir}")
 
         # 2. 플랫폼 감지
         platform = detect_platform(url)
     
-        # 3. 데이터 크롤링 (이 부분은 if문 밖으로 나와야 매번 실행됨!)
-        if platform == "musinsa":
-            raw_data = MusinsaPerfectScraper().run(url)
-        elif platform == "zigzag":
-            raw_data = ZigzagDetailCrawler().crawl_detail(url)
-        elif platform == "ably":
-            raw_data = crawl_ably(url)
-        else:
-            raw_data = {}
+        # 3. 크롤링 및 데이터 정규화 (위에 정의한 통합 함수 호출!) ✅
+        result = crawl_product_data(url, platform)
 
-        # 4. 데이터 정규화
-        product_name = raw_data.get("product_name") or raw_data.get("name") or "Unknown"
-    
-        def clean_num(val):
-            if not val: return 0
-            num = re.sub(r'[^0-9]', '', str(val))
-            return int(num) if num else 0
+        # ✅ 안전하게 상품명을 변수에 담기 (변수 선언!)
+        p_name = result.get("product_name", "Unknown")
 
-        result = {
-            "platform": platform,
-            "product_name": product_name,
-            "discount_rate": clean_num(raw_data.get("discount_rate")),
-            "review_count": clean_num(raw_data.get("review_count")),
-            "rating": raw_data.get("rating") or raw_data.get("review_rating") or "0",
-            "is_direct_shipping": raw_data.get("is_direct_shipping", 0)
-        }
+        if not result or p_name == "Unknown":
+            return {"product_name": "Error", "details": "데이터를 가져오지 못했습니다."}
 
-        # 5. 심리 축 분석 (로드된 전역 모델 _INFER_MODEL 사용)
-        SIM_COLS = ["sim_quality_logic", "sim_trend_hype", "sim_temptation", "sim_fit_anxiety", "sim_bundle", "sim_confidence"]
+        # 4. 심리 축 분석 (NLP 추론)
+        SIM_COLS = ["sim_quality_logic", "sim_trend_hype", "sim_temptation", 
+                    "sim_fit_anxiety", "sim_bundle", "sim_confidence"]
         
         if _INFER_MODEL is not None:
-            # ✅ 여기서 새로 생성하지 않고 전역 모델을 사용함!
-            _, labels = _INFER_MODEL.infer([product_name])
+            # result["name"]을 사용해서 심리 축 파악
+            _, labels = _INFER_MODEL.infer([result["product_name"]])
             for i, col in enumerate(SIM_COLS):
                 result[col] = int(labels[0][i]) if i < len(labels[0]) else 0
         else:
-            # 모델 로드 실패 시 기본값 0 세팅
             for col in SIM_COLS: result[col] = 0
 
+        # 최종 결과 반환
         return result
 
     except Exception as e:
-        print(f"CRITICAL ERROR: {e}")
+        # ❌ 단순히 e만 찍지 말고, 어디서 터졌는지 전체 경로를 다 찍어보자!
+        print("--- 에러 상세 경로 시작 ---")
+        print(traceback.format_exc()) 
+        print("--- 에러 상세 경로 끝 ---")
         return {"product_name": "Error", "details": str(e)}

@@ -9,6 +9,7 @@ from app.core.database import Base
 class Product(Base):
     __tablename__ = "products"
 
+    product_img = Column(Text)       # 상품 메인 이미지
     product_id = Column(BIGINT, primary_key=True, index=True)
     product_name = Column(String(255))
     category = Column(String(50))
