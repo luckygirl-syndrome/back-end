@@ -23,6 +23,7 @@ async def parse_product_url(
         # extract_features_from_url 내부에서 매번 KeywordAxisInfer()를 생성하지 않게 주의하세요.
         result = extract_features_from_url(url)
         
+        '''
         # 2. 에러 핸들링 보강
         if not result or result.get("product_name") == "Error":
             # extract_features_from_url에서 에러 시 {"product_name": "Error"}를 반환하므로 체크
@@ -31,19 +32,17 @@ async def parse_product_url(
 
         if result.get("product_name") == "Unknown":
             raise HTTPException(status_code=400, detail="지원하는 플랫폼이지만 상품명을 찾지 못했어.")
-
+        '''
         # 3. 결과 반환
         return {
             "status": "success",
             "data": result
         }
 
-    except HTTPException as he:
-        raise he
-    except ValueError as ve:
-        # 플랫폼 인식 실패 등의 에러
-        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        # 예상치 못한 시스템 에러 로그 출력
-        print(f"CRITICAL ROUTER ERROR: {e}")
-        raise HTTPException(status_code=500, detail="서버 내부 오류로 분석을 완료하지 못했어.")
+        # 🚩 여기가 핵심! 서버 터미널(로그)에 에러 원인을 낱낱이 다 찍어!
+        import traceback
+        print("🚨 [CRITICAL ERROR LOG] 🚨")
+        print(traceback.format_exc()) 
+        # 그리고 400 대신 에러 내용을 그대로 화면에 뱉어줘
+        raise HTTPException(status_code=400, detail=str(e))
