@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, BackgroundTasks
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from . import service
+import google.generativeai as genai  # ✅ 이 줄을 추가해줘!
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -41,51 +42,39 @@ async def start_chat(
         "message": "분석 시작했어! 그전에 네 상태 좀 체크해보자."
     }
 
-
-@router.post("/process-product")
-async def process_product(url: str, user_sbti: str, db: Session = Depends(get_db)):
-    # 1. 크롤링 수행 (가정: crawl_data 함수가 결과 dict를 반환)
-    raw_data = await crawling_service.crawl_url(url)
-    
-    # 2. DB에 저장 (이때 ㅇㅇ핏 정보 등도 같이 저장)
-    new_product = models.Product(**raw_data)
-    db.add(new_product)
-    db.commit()
-    db.refresh(new_product) # 생성된 product_id를 가져옴
-    
-    # 3. "타고 타고" 분석 로직 실행
-    # DB에 저장된 객체를 dict로 변환하여 분석기에 전달
-    analysis_result = analyze_product_risk(raw_data, user_sbti) # 위험도 분석해 스코어 반환
-    
-    return {
-        "message": "분석 완료!",
-        "product_id": new_product.product_id,
-        "analysis": analysis_result
-    }
-
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.chat.schemas import SurveyRequest  # 아까 만든 Pydantic 모델
+from app.chat import service
 
 @router.post("/finalize-survey")
 async def finalize_survey(
-    user_answers: dict, 
+    request: SurveyRequest,  # ✅ 이제 additionalProp1 대신 q1, q2.. 딱 뜸!
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user) # ✅ JWT로 유저 자동 식별
+    current_user: User = Depends(get_current_user)
 ):
-    # 1. 이 유저가 가장 최근에 분석 요청한 상품 찾기
+
+    # 1. Pydantic 모델을 dict로 변환 (q1, q2, q3, qc 포함)
+    user_answers = request.model_dump()
+
+    # 2. 이 유저가 가장 최근에 분석 요청한 '성공한' 상품 분석 기록 찾기
     last_request = db.query(UserProduct).filter(
-        UserProduct.user_id == current_user.user_id
+        UserProduct.user_id == current_user.user_id,
+        UserProduct.status == "COMPLETED"
     ).order_by(UserProduct.created_at.desc()).first()
 
     if not last_request:
-        raise HTTPException(status_code=404, detail="분석 중인 상품이 없어요!")
+        # 분석 중이거나 요청이 없는 경우
+        raise HTTPException(status_code=404, detail="아직 분석 결과가 안 나왔거나 요청한 상품이 없어! 조금만 기다려줘.")
 
-    # 2. 찾은 product_id를 가지고 챗봇 답변 생성
+    # 3. 챗봇 답변 생성 시작
+    # 서비스 레이어에서 이제 언니가 원했던 그 '최종 JSON' 형식을 만들어서 Gemini를 호출함
     first_response = await service.get_chat_response(
         db=db, 
         user_id=current_user.user_id, 
-        product_id=last_request.product_id, # ✅ 서버가 직접 찾아낸 ID 전달
+        product_id=last_request.product_id, 
         user_answers=user_answers, 
-        user_input="설문 완료!"
+        user_input="설문 완료!" # 첫 진입이므로 고정 메시지 전달
     )
     
     return {"reply": first_response}
-

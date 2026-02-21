@@ -146,7 +146,7 @@ def analyze_product_risk(product_json: dict, persona_code: str):
     risk_stage_info = next((lvl for lvl in RISK_LEVELS if lvl[0] <= final_score <= lvl[1]), RISK_LEVELS[-1])
     
     # 기여도 기준 Top 3 원인 추출
-    sorted_factors = sorted(weighted_breakdown.items(), key=lambda x: x[1], reverse=True)[:3]
+    sorted_factors = sorted(weighted_breakdown.items(), key=lambda x: x[1], reverse=True)[:2]
     top_causes = []
     for feat, val in sorted_factors:
         desc = ""
@@ -167,6 +167,6 @@ def analyze_product_risk(product_json: dict, persona_code: str):
         "total_score": round(final_score, 1),
         "risk_label": risk_stage_info[2],
         "risk_level": risk_stage_info[3],
-        "top_3_causes": top_causes,
+        "top_2_causes": top_causes,
         "breakdown": weighted_breakdown
     }
