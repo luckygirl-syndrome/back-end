@@ -33,6 +33,7 @@ class MusinsaPerfectScraper:
             'product_img': "", 'profile_img': "", 'product_name': "Unknown", 
             'brand': "Unknown", 'category': "Unknown", 'discounted_price': 0,
             'review_score': "0", 'review_count': "0", 'discount_rate': "0",
+            'free_shipping': 1,
             'is_direct_shipping': 0, 'product_likes': "0"
         }
 
@@ -143,12 +144,53 @@ class ZigzagDetailCrawler:
         cats = [a.get_text(strip=True) for a in soup.select('div[class*="breadcrumb"] a, a[class*="breadcrumb"]')]
         data['category'] = " > ".join(cats) if cats else "Unknown"
 
-        is_zdelivery = soup.select_one('svg[data-zds-graphic="LogoZdelivery"]')
-        data['is_direct_shipping'] = 1 if is_zdelivery else 0
+        # 지그재그 배송 정보 추출 (직진배송 & 일반 무료배송 집중)
+        try:
+            # 1. 초기화
+            data['is_direct_shipping'] = 0
+            data['free_shipping'] = 0
+    
+            page_source = self.driver.page_source
+
+            # 2. [직진배송] 판별 (LogoZdelivery만 타겟)
+            # 소스코드에 로고 이름이 있거나, 실제 요소를 찾았을 때
+            if 'LogoZdelivery' in page_source:
+                data['is_direct_shipping'] = 1
+                data['free_shipping'] = 1
+            else:
+                # 소스에 없더라도 실제 DOM에 로고가 있는지 한 번 더 체크
+                try:
+                    zdelivery_logo = self.driver.find_elements(By.CSS_SELECTOR, '[data-zds-graphic="LogoZdelivery"]')
+                    if zdelivery_logo:
+                        data['is_direct_shipping'] = 1
+                        data['free_shipping'] = 1
+                except: pass
+
+            # 3. [일반 무료배송] 판별 (직진배송이 아닐 때만 검사)
+            if data['is_direct_shipping'] == 0:
+                try:
+                    # '배송' 관련 키워드가 있는 아주 좁은 구역만 타겟팅
+                    # 지그재그는 보통 '배송비' 글자 근처에 '무료' 혹은 '무료배송'이 적힘
+                    delivery_el = self.driver.find_element(By.XPATH, "//div[contains(text(), '배송비')] | //span[contains(text(), '배송비')]")
+                    # 배송비 글자가 포함된 부모 요소 전체의 텍스트를 확인
+                    parent_text = delivery_el.find_element(By.XPATH, "./..").text
+            
+                    if '무료배송' in parent_text:
+                        data['free_shipping'] = 1
+                except:
+                    # 위에서 못 찾았을 경우에만 제한적으로 본문 앞부분 검색
+                    # (추천 상품이나 하단 광고 텍스트에 낚이지 않기 위함)
+                    body_start_text = self.driver.find_element(By.TAG_NAME, "body").text[:1500]
+                    if '무료배송' in body_start_text:
+                        data['free_shipping'] = 1
+
+        except Exception as e:
+            print(f"❌ 지그재그 배송 판별 오류: {e}")
         
         data['review_score'] = self._safe_get_text(soup, 'span[class*="eic0mh2"]')
         data['review_count'] = self._safe_get_text(soup, 'span[class*="zds4_lh8eqt5"]')
         
+        ''' 지그재그는 찜이 없어서 그냥 찜 0으로 하겠음.
         # 조회수 기반 임시 좋아요 대용
         view_text = self._safe_get_text(soup, 'div[class*="css-hjgjo9"]')
         if view_text:
@@ -156,7 +198,9 @@ class ZigzagDetailCrawler:
             data['product_likes'] = numbers if numbers else "0"
         else:
             data['product_likes'] = "0"
-            
+        '''    
+        data['product_likes'] = "0"
+
         return data
 
     def close(self):
@@ -169,66 +213,150 @@ class AblyDetailCrawler:
         self.chrome_options.add_argument('--no-sandbox')
         self.chrome_options.add_argument('--disable-dev-shm-usage')
         self.chrome_options.add_argument('--disable-gpu')
-        # 에이블리는 모바일 에이전트가 제일 정확해
-        self.chrome_options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1")
+        
+        # 🚩 봇 감지 우회 핵심 설정
+        self.chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        self.chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        self.chrome_options.add_experimental_option('useAutomationExtension', False)
+        
+        # 최신 아이폰 유저 에이전트
+        self.chrome_options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
+        
         self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
+        # 🚩 봇 감지 우회 자바스크립트 실행
+        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
     def crawl_detail(self, url):
-        # 1. 초기 바구니 설정
         data = {
             'product_name': "Unknown", 'brand': "Unknown", 'category': "Unknown",
             'product_img': "", 'profile_img': "",
-            'discounted_price': 0, 'discount_rate': "0",
+            'discounted_price': 0, 'discount_rate': 0,
             'review_count': 0, 'review_score': 0.0,
-            'product_likes': "0", 'is_direct_shipping': 0
+            'free_shipping': 1,
+            'product_likes': 0, 'is_direct_shipping': 0
         }
 
         try:
             self.driver.get(url)
-            time.sleep(5)
-            
-            # 스크롤 로직 (Lazy 로딩 대응)
-            for scroll in [1000, 2000]:
-                self.driver.execute_script(f"window.scrollTo(0, {scroll});")
-                time.sleep(1)
+            # 1. 페이지 로딩 대기
+            wait = WebDriverWait(self.driver, 10)
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+            # 🚀 [핵심] 3단계 스크롤 로직 (리뷰/찜수가 로딩될 기회를 줌)
+            for offset in [1000, 2000, 3000]: 
+                self.driver.execute_script(f"window.scrollTo(0, {offset});")
+                time.sleep(1.5) # 각 스크롤 후 로딩 대기
+
+            # 다시 맨 위로 살짝 올려서 상단 정보도 놓치지 않게 함
+            self.driver.execute_script("window.scrollTo(0, 500);")
+            time.sleep(1)
 
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
 
-            # 2. 이미지 & 제목 (메타 태그)
-            og_image = soup.find("meta", property="og:image")
-            data['product_img'] = og_image["content"] if og_image else ""
-            
+            # 1. 상품명 & 이미지 (메타 태그 + 셀렉터 백업)
             og_title = soup.find("meta", property="og:title")
             data['product_name'] = og_title["content"] if og_title else "제목 없음"
-
-            # 3. 브랜드 & 가격 & 리뷰 (텍스트 및 셀렉터 혼합)
-            page_text = self.driver.find_element(By.TAG_NAME, "body").text
             
-            # 가격 필살기
-            price_matches = re.findall(r'([\d,]+)원', page_text)
-            if price_matches:
-                data['discounted_price'] = int(price_matches[0].replace(',', ''))
+            og_image = soup.find("meta", property="og:image")
+            if og_image and og_image.get("content"):
+                data['product_img'] = og_image["content"]
+            else:
+                # 메타 태그 실패 시 실제 img 태그 찾기
+                try:
+                    img_el = self.driver.find_element(By.CSS_SELECTOR, 'div[class*="Image"] img, img[class*="ProductImage"]')
+                    data['product_img'] = img_el.get_attribute("src")
+                except: pass
 
-            # 브랜드명
+            # 2. 브랜드명
             try:
-                market_el = self.driver.find_element(By.CSS_SELECTOR, 'a[href*="/market/"] span, [class*="MarketName"]')
+                # 에이블리/지그재그 공통 마켓 명칭 셀렉터
+                market_el = self.driver.find_element(By.CSS_SELECTOR, 'a[href*="/market/"] span, [class*="MarketName"], [class*="StoreName"]')
                 data['brand'] = market_el.text.strip()
             except:
-                desc = soup.find("meta", property="og:description")
-                if desc: data['brand'] = desc['content'].split(' ')[0]
+                og_desc = soup.find("meta", property="og:description")
+                if og_desc: data['brand'] = og_desc['content'].split(' ')[0]
 
-            # 배송 정보
-            data['is_direct_shipping'] = 1 if '오늘출발' in page_text else 0
+            # 3. 가격
+            try:
+                price_text = self.driver.find_element(By.CSS_SELECTOR, 'span[class*="Price"], [class*="discount_price"]').text
+                data['discounted_price'] = int(re.sub(r'[^0-9]', '', price_text))
+            except: 
+                # 실패 시 기존 page_text 정규식 백업
+                page_text = self.driver.find_element(By.TAG_NAME, "body").text
+                price_matches = re.findall(r'([\d,]+)원', page_text)
+                if price_matches:
+                    data['discounted_price'] = int(price_matches[0].replace(',', ''))
 
+            # 4. 할인율 (discount_rate)
+            try:
+                price_container = self.driver.find_element(By.CLASS_NAME, "sc-ad5f1e6f-0")
+                discount_rate_el = price_container.find_elements(By.CLASS_NAME, "color__pink30")
+                data['discount_rate'] = discount_rate_el[0].text.replace('%', '').strip() if discount_rate_el else "0"
+            except:
+                # 백업: 전체 텍스트에서 % 앞에 있는 숫자 찾기
+                rate_match = re.search(r'(\d+)%', self.driver.find_element(By.TAG_NAME, "body").text)
+                if rate_match:
+                    data['discount_rate'] = int(rate_match.group(1))
+
+            # 2. 리뷰 점수 & 개수 (강력한 정규식 버전)
+            try:
+                page_text = self.driver.find_element(By.TAG_NAME, "body").text
+                count_match = re.search(r'리뷰\s*([\d,]+)개', page_text)
+                if count_match:
+                    data['review_count'] = int(count_match.group(1).replace(',', ''))
+                else:
+                    data['review_count'] = 0
+            
+                score_match = re.search(r'([\d.]+)%가\s*만족한', page_text)
+                if score_match:
+                    raw_percent = float(score_match.group(1))
+                    data['review_score'] = round(max(0, (raw_percent - 50) / 10), 2)
+                else:
+                    data['review_score'] = 0.0
+            except:
+                data['review_count'] = 0
+                data['review_score'] = 0.0
+
+            try:
+                likes_container = self.driver.find_element(By.CLASS_NAME, "sc-45b21edb-3")
+                likes_text = likes_container.find_element(By.CLASS_NAME, "color__pink30").text.strip()
+                if '만' in likes_text:
+                    data['product_likes'] = str(int(float(likes_text.replace('만', '')) * 10000))
+                else:
+                    data['product_likes'] = likes_text.replace(',', '')
+            except:
+                data['product_likes'] = "0"
+
+           # 7. 오늘출발 이미지 판별 (언니가 준 주소 그대로 사용)
+            try:
+                # 페이지의 모든 이미지를 다 가져와서
+                all_imgs = self.driver.find_elements(By.TAG_NAME, 'img')
+                
+                is_today = False
+                for img in all_imgs:
+                    src = img.get_attribute('src')
+                    if src:
+                        # 언니가 준 그 긴 주소의 핵심 부분만 포함되어 있는지 확인!
+                        # 주소 전체를 다 넣어도 되고, 유니크한 뒷부분만 넣어도 돼.
+                        if "today_delivery_compact.png" in src or "czM6Ly9pbWcuYS1ibHkuY29tL2RhdGEvZ29vZHMvZGVsaXZlcnktdHlwZS90b2RheV9kZWxpdmVyeV9jb21wYWN0LnBuZw" in src:
+                            is_today = True
+                            break
+                
+                data['is_direct_shipping'] = 1 if is_today else 0
+
+            except Exception as e:
+                print(f"❌ 배송 판별 오류: {e}")
+                data['is_direct_shipping'] = 0
+                
             return data
 
         except Exception as e:
-            print(f"❌ Ably Crawler Error: {e}")
-            return data
+            print(f"❌ Crawling Error: {e}")
+            return {}
 
     def close(self):
         self.driver.quit()
-
+        
 def crawl_product_data(url, platform):
     print(f"Crawling {url} on {platform}...")
     data = {}
@@ -262,6 +390,7 @@ def crawl_product_data(url, platform):
     normalized_data["brand"] = data.get("brand", "Unknown")
     normalized_data["product_name"] = data.get("product_name", "Unknown")
     normalized_data["discounted_price"] = int(data.get("discounted_price", 0))
+    normalized_data["free_shipping"] = data.get("free_shipping", 0)
 
     dr = data.get("discount_rate", "0")
     if isinstance(dr, str): dr = re.sub(r'[^0-9]', '', dr)
