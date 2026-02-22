@@ -267,20 +267,18 @@ async def get_chat_response(db: Session, user_id: int, product_id: int, user_ans
             "category": product.category
         },
         "mode_block": { "current_mode": mode },
-        
+
         "impulse_block": {
             "impulse_score": record.risk_score_1,
-            "intervention_level": level_num,
             "impulse_reason_top2": [
                 {
                     "feature_key": cause["feature_key"],
+                    "value": details.get('feature_values', {}).get(cause["feature_key"]), # 👈 value 추가!
                     "weight": round(cause["score_contribution"] / max(1, record.risk_score_1), 2),
-                    "guide": (
-                        guide_info["features"].get(
+                    "guide": guide_info["features"].get(
                             f"review_count_{persona_suffix}" if cause["feature_key"] == "review_count" else cause["feature_key"],
                             "이 부분 주의깊게 봐!"
                         )
-                    )
                 } for cause in details.get('top_2_causes', [])
             ]
         },
@@ -292,6 +290,7 @@ async def get_chat_response(db: Session, user_id: int, product_id: int, user_ans
             "prior_reason_top2": [
                 {
                     "feature_key": r[0],
+                    "value": details.get('feature_values', {}).get(r[0]), # 👈 실제 수치(ex: 4.7, 30) 추가!
                     "guide": PRIOR_TEXT.get(
                         f"{persona_prefix}review_count" if r[0] == "review_count" else r[0],
                         f"너랑 비슷한 유형은 '{FEATURE_KO.get(r[0], r[0])}' 조건이 만족스러우면 고민이 줄어드는 편이야."
@@ -302,6 +301,7 @@ async def get_chat_response(db: Session, user_id: int, product_id: int, user_ans
             "personal_reason_top2": [
                 {
                     "feature_key": r[0],
+                    "value": details.get('feature_values', {}).get(r[0]), # 👈 실제 수치 추가!
                     "guide": personal_text_dict.get(
                         f"{persona_prefix}{r[0]}" if r[0] in ["review_count", "product_likes"] else r[0],
                         f"이 옷의 '{FEATURE_KO.get(r[0], r[0])}' 조건은 네 평소 스타일이랑 조금 다를 수 있어."
