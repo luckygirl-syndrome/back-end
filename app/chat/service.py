@@ -12,8 +12,9 @@ from app.products.models import Product, UserProduct
 from app.products.parsers.item_parser import extract_features_from_url
 from app.chat.logic.impulse_calculator import analyze_product_risk
 from app.chat.logic.final_prefer import infer_all
+from app.chat.logic.user_survey import determine_mode
 from .prompt import TobabaPromptBuilder
-from .constants import IMPULSE_GUIDE_DATA
+from .constants import IMPULSE_GUIDE_DATA, SURVEY_TEXT_MAPPING, DEFAULT_VALUES, SURVEY_SCORE_TABLE, PRIOR_TEXT, PERSONAL_POS_TEXT, PERSONAL_RISK_TEXT
 
 import redis
 import json
@@ -47,90 +48,7 @@ FEATURE_KO = {
     'sim_bundle': '1+1/묶음 할인', 'sim_confidence': 'MD추천/보증'
 }
 
-def get_logic_gate_mode(user_answers: dict):
-    # 1. 질문별 스코어 테이블 설정
-    # (Brake, Decider) 순서
-    q1_table = {1: (2, 0), 2: (1, 0), 3: (0, 1), 4: (0, 2), 5: (0, 3)}
-    q2_table = {1: (2, 0), 2: (1, 0), 3: (0, 2), 4: (0, 1)}
-    q3_table = {1: (0, 1), 2: (1, 0), 3: (2, 0), 4: (0, 2)}
-    
-    # 2. 총점 계산
-    b_score = q1_table[user_answers['q1']][0] + q2_table[user_answers['q2']][0] + q3_table[user_answers['q3']][0]
-    d_score = q1_table[user_answers['q1']][1] + q2_table[user_answers['q2']][1] + q3_table[user_answers['q3']][1]
 
-    # 3. [최종 로직 결정] 동점이면 DECIDER!
-    if b_score > d_score:
-        mode = "BRAKE"
-    elif d_score > b_score:
-        mode = "DECIDER"
-    else:
-        mode = "DECIDER" # 동점일 때 처리
-        
-    return mode, b_score, d_score
-
-async def get_chat_response(db: Session, user_id: int, user_answers: dict, user_input: str, history: list = []):
-    # 1. DB 유저 정보
-    user = db.query(User).filter(User.user_id == user_id).first()
-    
-    # 2. 로직 게이트 (모드/점수 확정)
-    mode, b_score, d_score = get_logic_gate_mode(user_answers)
-    
-    # QC 매칭
-    qc_map = {1:"가성비", 2:"시즌오프 세일 / 품절 임박", 3:"요즘 유행템 같아서, 연예인이 입었대서", 4:"퀄리티가 좋을 것 같아서", 5:"MD, 인플루언서가 픽했대서", 6:"모델이 입은 핏이 예뻐서", 7:"배송이 빨리 와야해서"}
-    key_appeal_text = qc_map.get(user_answers['qc'], "디자인")
-    
-    # 3. 레벨 확정 및 가이드 데이터 추출
-    level_num = min(5, max(1, b_score))
-    level_key = f"Level {level_num}"
-    
-    # [핵심] 매핑 없이 해당 레벨의 모든 가이드 문장 셋을 가져옴
-    # 언니가 constants.py에 정의한 "잠깐! 너 지금..." 같은 문장들이 여기 다 들어있음
-    level_guides = IMPULSE_GUIDE_DATA[level_key]
-
-    # 4. 언니 빌더용 데이터 조립 (Input JSON)
-    data = {
-        "user_context": {
-            "persona_type": user.persona_type,
-            "target_style": "유저의 추구미"
-        },
-        "product_context": {
-            "name": "상의", 
-            "brand": "아캄",
-            "price": 100000
-        },
-        "mode_block": {"current_mode": mode},
-        "impulse_block": {
-            "impulse_score": b_score * 20,
-            # 매핑 로직 삭제: 레벨에 해당하는 문장 딕셔너리를 통째로 넘김
-            # LLM이 'impulse_reason_top2' 내의 문장들을 보고 유저 답변(qc)과 대조해서 발화함
-            "impulse_reason_top2": [
-                {"feature_key": k, "guide": v} for k, v in level_guides["features"].items()
-            ]
-        },
-        "preference_block": {
-            "total_score": d_score * 20,
-            "personal_score": 50,
-            "mixing": {"preference_priority": "personal"}
-        },
-        "conversation_block": {
-            "key_appeal": key_appeal_text,
-            "cart_duration": f"선택지 {user_answers['q1']}번 기간"
-        },
-        "strategy_matrix": {
-            "goal": level_guides["goal"],
-            "strategy": level_guides["strategy"]
-        }
-    }
-
-    # 5. 프롬프트 빌드 및 실행
-    builder = TobabaPromptBuilder(data, user_input=user_input, history=history)
-    model = genai.GenerativeModel(
-        model_name='gemini-1.5-flash',
-        system_instruction=builder.get_system_instruction()
-    )
-    
-    response = model.generate_content(builder.build_dynamic_context())
-    return response.text
 
 def clean_persona_code(user):
     """프로젝트 표준 순서(1:D/N, 2:S/A, 3:M/T)에 맞춰 페르소나 코드 정렬"""
@@ -220,7 +138,8 @@ def parse_and_save_product(db: Session, url: str, user: User):
             "prior_reasons": pref_out.get('prior_reason_top2', []),
             "personal_reasons": pref_out.get('personal_reason_top2', []),
             "prior_score": pref_out.get('prior_score', 0),
-            "personal_score": pref_out.get('personal_score', 0)
+            "personal_score": pref_out.get('personal_score', 0),
+            "personal_reason_type": pref_out.get('personal_reason_type', 'neutral')
         }
     
         # Redis에 저장 (3600초 = 1시간 유지)
@@ -229,7 +148,7 @@ def parse_and_save_product(db: Session, url: str, user: User):
 
         # 5. 프롬프트 데이터 조립
         prompt_data = {
-            "user_context": {"persona_type": user_persona_code, "target_style": getattr(user, 'target_style', '심플'), "n_effective": pref_out["n_effective"]},
+            "user_context": {"persona_type": user_persona_code, "target_style": getattr(user, 'chu_gu_me', '심플'), "n_effective": pref_out["n_effective"]},
             "analysis_result": {"total_prefer_score": total_pref_score, "impulse_score": impulse_score, "alpha_value": pref_out["alpha"]},
             "prior_analysis": {"score": pref_out["prior_score"], "top_reasons": [{"feature": r[0], "value": r[1]} for r in pref_out["prior_reason_top2"]]},
             "personal_analysis": {"score": pref_out["personal_score"], "reason_type": pref_out["personal_reason_type"], "top_reasons": [{"feature": r[0], "value": r[1]} for r in pref_out["personal_reason_top2"]]},
@@ -305,23 +224,46 @@ async def get_chat_response(db: Session, user_id: int, product_id: int, user_ans
     else:
         details = json.loads(cached_raw)
 
-    # 2. 로직 게이트 및 가이드 데이터 추출
-    mode, b_score, d_score = get_logic_gate_mode(user_answers)
+    # 2. 모드 결정 및 가이드 데이터 추출
+    mode = determine_mode([
+        {"q_id": 1, "answer_id": user_answers.get('q1')},
+        {"q_id": 2, "answer_id": user_answers.get('q2')},
+        {"q_id": 3, "answer_id": user_answers.get('q3')}
+    ])
+    
+    # 충동 지수 레벨 계산 (임시로 기존 b_score 로직 유지 혹은 record 활용)
+    # 기존 b_score 로직을 constants의 스코어 테이블 기반으로 재산출
+    b_score = SURVEY_SCORE_TABLE["q1"].get(user_answers.get('q1'), (0,0))[0] + \
+              SURVEY_SCORE_TABLE["q2"].get(user_answers.get('q2'), (0,0))[0] + \
+              SURVEY_SCORE_TABLE["q3"].get(user_answers.get('q3'), (0,0))[0]
+    
     level_num = min(5, max(1, b_score))
     level_key = f"Level {level_num}"
     guide_info = IMPULSE_GUIDE_DATA.get(level_key)
 
-    # 3. [최종 JSON] 조립 (레디스 데이터 활용)
+    # 4. [선호도 블록] 맞춤 텍스트 매핑 로직
+    persona_suffix = record.user_type[-1].lower() # 't' or 'm'
+    persona_prefix = "default_" if persona_suffix == 't' else "myway_"
+    
+    # Personal 텍스트 사전 선택
+    p_type = details.get('personal_reason_type', 'positive')
+    personal_text_dict = PERSONAL_RISK_TEXT if p_type == 'risk' else PERSONAL_POS_TEXT
+
     final_input_json = {
+        "meta": {
+            "trace_id": str(re.sub(r'[^a-zA-Z0-9]', '', str(datetime.datetime.now().timestamp()))),
+            "timestamp": datetime.datetime.now().isoformat()
+        },
         "user_context": {
             "persona_type": record.user_type,
-            "target_style": getattr(user, 'target_style', '심플')
+            "frequent_malls": json.loads(user.favorite_shops) if user.favorite_shops and user.favorite_shops.startswith("[") else ([user.favorite_shops] if user.favorite_shops else []),
+            "target_style": getattr(user, 'chu_gu_me', '심플')
         },
         "product_context": {
             "name": product.product_name,
-            "brand": product.platform,
-            "price": product.price,
+            "brand": product.brand if hasattr(product, 'brand') else product.platform,
             "mall": product.platform,
+            "price": product.price,
             "category": product.category
         },
         "mode_block": { "current_mode": mode },
@@ -331,32 +273,48 @@ async def get_chat_response(db: Session, user_id: int, product_id: int, user_ans
             "intervention_level": level_num,
             "impulse_reason_top2": [
                 {
-                    "feature_key": cause["feature_name"],
-                    "guide": guide_info["features"].get(cause["feature_name"], "이 부분 주의깊게 봐!")
+                    "feature_key": cause["feature_key"],
+                    "weight": round(cause["score_contribution"] / max(1, record.risk_score_1), 2),
+                    "guide": (
+                        guide_info["features"].get(
+                            f"review_count_{persona_suffix}" if cause["feature_key"] == "review_count" else cause["feature_key"],
+                            "이 부분 주의깊게 봐!"
+                        )
+                    )
                 } for cause in details.get('top_2_causes', [])
             ]
         },
         
         "preference_block": {
             "total_score": record.preference_score,
-            "mixing": { "preference_priority": "personal" },
+            "mixing": { "preference_priority": DEFAULT_VALUES["preference_priority"] },
             "prior_score": details.get('prior_score', 0),
             "prior_reason_top2": [
-                {"feature_key": r[0], "guide": f"너랑 비슷한 유형은 '{r[0]}'을 중요하게 봐."} 
-                for r in details.get('prior_reasons', [])
+                {
+                    "feature_key": r[0],
+                    "guide": PRIOR_TEXT.get(
+                        f"{persona_prefix}review_count" if r[0] == "review_count" else r[0],
+                        f"너랑 비슷한 유형은 '{FEATURE_KO.get(r[0], r[0])}' 조건이 만족스러우면 고민이 줄어드는 편이야."
+                    )
+                } for r in details.get('prior_reasons', [])
             ],
             "personal_score": details.get('personal_score', 0),
             "personal_reason_top2": [
-                {"feature_key": r[0], "guide": f"이 옷의 '{r[0]}' 조건은 네 스타일이랑 좀 달라."}
-                for r in details.get('personal_reasons', [])
+                {
+                    "feature_key": r[0],
+                    "guide": personal_text_dict.get(
+                        f"{persona_prefix}{r[0]}" if r[0] in ["review_count", "product_likes"] else r[0],
+                        f"이 옷의 '{FEATURE_KO.get(r[0], r[0])}' 조건은 네 평소 스타일이랑 조금 다를 수 있어."
+                    )
+                } for r in details.get('personal_reasons', [])
             ]
         },
         
         "conversation_block": {
-            "cart_duration": get_q1_text(user_answers['q1']),
-            "contact_reason": get_q2_text(user_answers['q2']),
-            "purchase_certainty": get_q3_text(user_answers['q3']),
-            "key_appeal": get_qc_text(user_answers['qc'])
+            "cart_duration": SURVEY_TEXT_MAPPING["q1"].get(user_answers.get('q1'), "방금 전"),
+            "contact_reason": SURVEY_TEXT_MAPPING["q2"].get(user_answers.get('q2'), "궁금해서"),
+            "purchase_certainty": SURVEY_TEXT_MAPPING["q3"].get(user_answers.get('q3'), "확신 없음"),
+            "key_appeal": SURVEY_TEXT_MAPPING["qc"].get(user_answers.get('qc'), "디자인")
         },
         
         "strategy_matrix": {
