@@ -88,18 +88,15 @@ def clean_persona_code(user):
 
 def parse_and_save_product(db: Session, url: str, user: User):
     try:
-        # 1. 일단 우리끼리 쓸 '순서 정렬된' 깔끔한 코드 생성 (예: DSM)
-        user_persona_code = clean_persona_code(user) # 위에서 만든 정렬 로직 사용 (하이픈 제거 버전)
-
-        # 2. 🔥 모델한테 줄 때만 하이픈 살짝 끼워넣기
-        # DSM -> D-S-M
+        # 1. 페르소나 코드 정리
+        user_persona_code = clean_persona_code(user) 
         model_ready_code = f"{user_persona_code[0]}-{user_persona_code[1]}-{user_persona_code[2]}"
 
+        # URL에서 특징 추출
         result = extract_features_from_url(url)
         if not result or result.get("product_name") == "Error": return None
 
         # 2. 분석 (위험도 & 선호도)
-        # 💡 result 안에 이미 모든 심리 축과 정규화된 데이터가 있어서 그대로 활용!
         risk_res = analyze_product_risk(result, model_ready_code)
         pref_out = infer_all(item_json=result, persona_type=model_ready_code, prior_dir=PRIOR_MODEL_DIR)
         
@@ -114,11 +111,12 @@ def parse_and_save_product(db: Session, url: str, user: User):
                 product_name=result.get('product_name', 'Unknown'),
                 platform=result.get('platform', 'Unknown'),
                 category=result.get('category', '기타'),
-                price=int(result.get('discounted_price', 0)), # ✅ 키값 통일
+                free_shipping=bool(result.get('free_shipping', 0)),
+                price=int(result.get('discounted_price', 0)),
                 discount_rate=float(result.get('discount_rate', 0)),
                 is_direct_shipping=bool(result.get('is_direct_shipping', 0)),
                 review_count=int(result.get('review_count', 0)),
-                review_score=float(result.get('review_score', 0.0)), # ✅ rating -> review_score
+                review_score=float(result.get('review_score', 0.0)),
                 product_likes=str(result.get('product_likes', '0')),
                 **{col: result.get(col, 0) for col in ["sim_temptation", "sim_trend_hype", "sim_fit_anxiety", "sim_quality_logic", "sim_bundle", "sim_confidence"]}
             )
@@ -132,36 +130,49 @@ def parse_and_save_product(db: Session, url: str, user: User):
         )
         db.add(user_prod); db.commit()
 
-        # 캐시용 데이터 조립
+        # 🔥 [핵심 추가] 실제 수치 데이터들 모으기 (value: null 방지용)
+        # result 딕셔너리에 들어있는 실제 값들을 feature_key 이름에 맞춰 정리해
+        feature_values = {
+            "discount_rate": result.get('discount_rate', 0),
+            "review_score": result.get('review_score', 0),
+            "review_count": result.get('review_count', 0),
+            "product_likes": result.get('product_likes', 0),
+            "price": result.get('discounted_price', 0),
+            "free_shipping": result.get('free_shipping', 0) 
+        }
+
+        # 캐시용 데이터 조립 (details에 feature_values 추가!)
         details = {
             "top_2_causes": risk_res.get('top_2_causes', []),
             "prior_reasons": pref_out.get('prior_reason_top2', []),
             "personal_reasons": pref_out.get('personal_reason_top2', []),
             "prior_score": pref_out.get('prior_score', 0),
             "personal_score": pref_out.get('personal_score', 0),
-            "personal_reason_type": pref_out.get('personal_reason_type', 'neutral')
+            "personal_reason_type": pref_out.get('personal_reason_type', 'neutral'),
+            "feature_values": feature_values # 🚩 이 녀석이 나중에 value 자리에 들어감!
         }
     
-        # Redis에 저장 (3600초 = 1시간 유지)
+        # Redis에 저장 (한글 깨짐 방지 위해 ensure_ascii=False 추천)
         cache_key = f"analysis:{user.user_id}:{product.product_id}"
-        redis_client.setex(cache_key, 3600, json.dumps(details))
+        redis_client.setex(cache_key, 3600, json.dumps(details, ensure_ascii=False))
 
-        # 5. 프롬프트 데이터 조립
+        # 5. 프롬프트 데이터 조립 (터미널 출력용 리포트 데이터)
         prompt_data = {
             "user_context": {"persona_type": user_persona_code, "target_style": getattr(user, 'chu_gu_me', '심플'), "n_effective": pref_out["n_effective"]},
             "analysis_result": {"total_prefer_score": total_pref_score, "impulse_score": impulse_score, "alpha_value": pref_out["alpha"]},
-            "prior_analysis": {"score": pref_out["prior_score"], "top_reasons": [{"feature": r[0], "value": r[1]} for r in pref_out["prior_reason_top2"]]},
-            "personal_analysis": {"score": pref_out["personal_score"], "reason_type": pref_out["personal_reason_type"], "top_reasons": [{"feature": r[0], "value": r[1]} for r in pref_out["personal_reason_top2"]]},
-            "impulse_block": {"score": impulse_score, "label": risk_res["risk_label"], "level": risk_res["risk_level"], "top_causes": [{"name": c["feature_name"], "detail": c["detail"]} for c in risk_res["top_2_causes"]]}
+            "prior_analysis": {"score": pref_out["prior_score"], "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["prior_reason_top2"]]},
+            "personal_analysis": {"score": pref_out["personal_score"], "reason_type": pref_out["personal_reason_type"], "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["personal_reason_top2"]]},
+            "impulse_block": {"score": impulse_score, "label": risk_res["risk_label"], "level": risk_res["risk_level"], "top_causes": [{"name": c["feature_name"], "value": feature_values.get(c["feature_key"]), "detail": c["detail"]} for c in risk_res["top_2_causes"]]}
         }
 
-        # 6. 터미널 리포트 출력 (prompt_data를 추가로 넘겨줌!)
+        # 6. 터미널 리포트 출력
         print_analysis_report(user.user_id, user_persona_code, product.product_name, pref_out, risk_res, prompt_data)
 
         return prompt_data
 
     except Exception as e:
         db.rollback()
+        import traceback
         print(f"❌ 에러 발생:\n{traceback.format_exc()}")
         return None
 
@@ -324,6 +335,13 @@ async def get_chat_response(db: Session, user_id: int, product_id: int, user_ans
             "strategy": guide_info["strategy"]
         }
     }
+
+    # 📝 [로그] 생성된 JSON 터미널에서 확인하기
+    print("\n" + "="*50)
+    print(f"🚀 LLM INPUT JSON (Trace: {final_input_json['meta']['trace_id']})")
+    print("-"*50)
+    print(json.dumps(final_input_json, indent=4, ensure_ascii=False)) # indent=4로 예쁘게 정렬!
+    print("="*50 + "\n")
 
     # 4. 이제 이 JSON을 빌더에게 던짐!
     builder = TobabaPromptBuilder(final_input_json, current_step=1, user_input=user_input, history=history)
