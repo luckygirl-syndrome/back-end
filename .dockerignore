@@ -1,0 +1,27 @@
+# Git
+.git
+.gitignore
+
+# 환경 설정
+.env
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+AI/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Redis 볼륨 데이터
+redis_data/
+
+# OS/IDE
+.DS_Store
