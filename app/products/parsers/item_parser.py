@@ -4,7 +4,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from bs4 import BeautifulSoup
-from selenium import webdriver
+
+# 🚩 [수정] selenium 대신 seleniumwire를 임포트해야 프록시 옵션을 인식해!
+from seleniumwire import webdriver 
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -262,22 +264,42 @@ class ZigzagDetailCrawler:
 
 class AblyDetailCrawler:
     def __init__(self):
+        # 1. 프록시 정보 설정
+        proxy_id = "8a4a020f0b6a91a4299c"
+        proxy_pw = "c9f06f1bee8caf88"
+        proxy_host = "gw.dataimpulse.com"
+        proxy_port = "823"
+
+        proxy_options = {
+            'proxy': {
+                'http': f'http://{proxy_id}:{proxy_pw}@{proxy_host}:{proxy_port}',
+                'https': f'http://{proxy_id}:{proxy_pw}@{proxy_host}:{proxy_port}',
+                'no_proxy': 'localhost,127.0.0.1'
+            }
+        }
+
         self.chrome_options = Options()
+        # 🚩 데이터 아끼기용 이미지 차단 (이게 문제면 2를 1로 바꾸거나 이 블록을 삭제해!)
+        prefs = {"profile.managed_default_content_settings.images": 2}
+        self.chrome_options.add_experimental_option("prefs", prefs)
+
+        # 언니가 원래 쓰던 우회 설정 그대로!
         self.chrome_options.add_argument('--headless')
         self.chrome_options.add_argument('--no-sandbox')
         self.chrome_options.add_argument('--disable-dev-shm-usage')
         self.chrome_options.add_argument('--disable-gpu')
-        
-        # 🚩 봇 감지 우회 핵심 설정
         self.chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         self.chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         self.chrome_options.add_experimental_option('useAutomationExtension', False)
-        
-        # 최신 아이폰 유저 에이전트
         self.chrome_options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
+
+        # 🚩 [수정 포인트] seleniumwire_options만 추가!
+        self.driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()), 
+            options=self.chrome_options,
+            seleniumwire_options=proxy_options # 프록시 주입
+        )
         
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
-        # 🚩 봇 감지 우회 자바스크립트 실행
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
     def crawl_detail(self, url):
@@ -297,7 +319,7 @@ class AblyDetailCrawler:
             wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
 
             # 🚀 [핵심] 3단계 스크롤 로직 (리뷰/찜수가 로딩될 기회를 줌)
-            for offset in [1000, 2000, 3000]: 
+            for offset in [800, 1600]: 
                 self.driver.execute_script(f"window.scrollTo(0, {offset});")
                 time.sleep(1.5) # 각 스크롤 후 로딩 대기
 
