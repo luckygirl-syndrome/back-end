@@ -4,9 +4,11 @@ import json
 import re
 import traceback
 import joblib
+from datetime import datetime
 import google.generativeai as genai
 from sqlalchemy.orm import Session
 
+from app.chat.models import ChatListItem
 from app.users.models import User
 from app.products.models import Product, UserProduct
 from app.products.parsers.item_parser import extract_features_from_url
@@ -457,3 +459,49 @@ def parse_llm_response(text: str):
     clean_msg = clean_msg.strip()
     
     return clean_msg, next_step, is_held
+
+def get_time_display(dt: datetime) -> str:
+    if not dt: return "알 수 없음"
+    now = datetime.now()
+    diff = now - dt
+    if diff.days == 0: return "오늘"
+    if diff.days == 1: return "어제"
+    return f"{diff.days}일 전"
+
+def get_user_chat_list(db: Session, user_id: int):
+    # 1. UserProduct와 Product를 조인해서 최신 업데이트순으로 가져오기
+    results = (
+        db.query(UserProduct, Product)
+        .join(Product, UserProduct.product_id == Product.product_id)
+        .filter(UserProduct.user_id == user_id)
+        .order_by(UserProduct.updated_at.desc())
+        .all()
+    )
+
+    if not results:
+        return {"latest_chat": None, "all_chats": []}
+
+    chat_items = []
+    for user_prod, prod in results:
+        # 상태값 매핑 (언니의 status 필드나 is_purchased 활용)
+        status_label = "고민 중"
+        if user_prod.is_purchased == 1:
+            status_label = "구매 완료"
+        elif user_prod.status == "ABANDONED": # 예시 상태값
+            status_label = "구매 포기"
+
+        item = ChatListItem(
+            user_product_id=user_prod.user_product_id,
+            product_name=prod.product_name,
+            product_img=prod.product_img,
+            price=prod.price,
+            last_chat_time=get_time_display(user_prod.updated_at),
+            status_label=status_label,
+            is_purchased=user_prod.is_purchased
+        )
+        chat_items.append(item)
+
+    return {
+        "latest_chat": chat_items[0], # 가장 최근 1개
+        "all_chats": chat_items       # 전체 리스트
+    }

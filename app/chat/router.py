@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from . import service
 import google.generativeai as genai  # ✅ 이 줄을 추가해줘!
+from app.chat.models import ChatListResponse
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -97,3 +98,10 @@ async def finalize_survey(
     )
     
     return {"reply": first_response}
+
+@router.get("/list", response_model=ChatListResponse)
+async def get_chat_list(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    return service.get_user_chat_list(db, current_user.user_id)
