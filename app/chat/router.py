@@ -15,7 +15,15 @@ from app.chat.models import Chat
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-@router.post("/start")
+@router.post(
+    "/start",
+    summary="채팅 세션 시작 및 설문 항목 전달",
+    description="""
+    유저가 보낸 상품 URL을 분석하기 위해 임시 분석 레코드(UserProduct)를 생성하고,
+    백그라운드에서 크롤링 및 상품 분석을 시작합니다.
+    분석이 진행되는 동안 유저가 답변해야 할 심리 설문(Survey) 항목들을 반환합니다.
+    """
+)
 async def start_chat(
     product_url: str, 
     background_tasks: BackgroundTasks, 
@@ -63,7 +71,15 @@ from sqlalchemy.orm import Session
 from app.chat.schemas import SurveyRequest  # 아까 만든 Pydantic 모델
 from app.chat import service
 
-@router.post("/finalize-survey/{user_product_id}")
+@router.post(
+    "/finalize-survey/{user_product_id}",
+    summary="설문 답변 제출 및 챗봇 첫 응답 생성",
+    description="""
+    유저의 설문 답변을 기반으로 챗봇의 첫 번째 분석 메시지를 생성합니다.
+    이 과정에서 챗봇의 설문 질문들과 유저의 답변들을 채팅 내용(Chat)으로 변환하여 저장하며,
+    Redis와 DB에 대화 내역을 동기화합니다.
+    """
+)
 async def finalize_survey(
     user_product_id: int,
     request: SurveyRequest,  # ✅ 이제 additionalProp1 대신 q1, q2.. 딱 뜸!
@@ -137,14 +153,31 @@ async def finalize_survey(
     
     return {"reply": first_response}
 
-@router.get("/list", response_model=ChatListResponse)
+@router.get(
+    "/list", 
+    response_model=ChatListResponse,
+    summary="유저의 채팅 목록 조회 (상품별 중복 제거)",
+    description="""
+    현재 유저가 대화 중인 모든 채팅방 목록을 반환합니다.
+    동일한 상품을 여러 번 분석한 경우, 가장 최근에 생성된 채팅방 하나만 리스트에 포함됩니다.
+    최신 대화순으로 정렬되어 제공됩니다.
+    """
+)
 async def get_chat_list(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     return service.get_user_chat_list(db, current_user.user_id)
 
-@router.get("/room/{user_product_id}", response_model=schemas.ChatRoomDetailResponse)
+@router.get(
+    "/room/{user_product_id}", 
+    response_model=schemas.ChatRoomDetailResponse,
+    summary="특정 채팅방 상세 정보 및 메시지 목록 조회",
+    description="""
+    특정 채팅방의 상단 상품 정보와 지금까지 나눈 전체 대화 내역을 조회합니다.
+    속도 향상을 위해 Redis 캐시를 우선적으로 확인하며, 캐시가 없을 경우 DB에서 복구합니다.
+    """
+)
 async def get_chat_room_detail(
     user_product_id: int,
     db: Session = Depends(get_db),
@@ -161,7 +194,14 @@ async def get_chat_room_detail(
         
     return detail
 
-@router.post("/exit/{user_product_id}")
+@router.post(
+    "/exit/{user_product_id}",
+    summary="채팅방 종료",
+    description="""
+    해당 채팅방의 상태를 'FINISHED'(대화 종료)로 변경합니다.
+    채팅방 목록에서 해당 상품의 상태를 업데이트하는 데 사용됩니다.
+    """
+)
 async def exit_chat(
     user_product_id: int,
     db: Session = Depends(get_db),
