@@ -19,12 +19,14 @@ from .constants import IMPULSE_GUIDE_DATA, SURVEY_TEXT_MAPPING, DEFAULT_VALUES, 
 import redis
 import json
 
-# Redis 연결 (설정에 따라 주소 변경)
+from app.core.config import settings
+
+# Redis 연결 (환경변수 REDIS_HOST, REDIS_PORT 사용 → Docker에서는 redis 서비스명으로 연결)
 redis_client = redis.Redis(
-    host='localhost', 
-    port=6379, 
-    db=0, 
-    decode_responses=True  # 이걸 해야 문자열로 바로 읽어와!
+    host=settings.REDIS_HOST,
+    port=settings.REDIS_PORT,
+    db=0,
+    decode_responses=True,
 )
 
 # 1. 현재 파일(service.py) 위치: app/chat/service.py
