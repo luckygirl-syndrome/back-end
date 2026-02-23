@@ -7,6 +7,7 @@ import joblib
 from datetime import datetime
 import google.generativeai as genai
 from sqlalchemy.orm import Session
+from chat.enum import ChatStatus
 
 from app.chat.models import ChatListItem
 from app.users.models import User
@@ -481,14 +482,24 @@ def get_user_chat_list(db: Session, user_id: int):
     if not results:
         return {"latest_chat": None, "all_chats": []}
 
+    # 2. 화면에 보여줄 한글 라벨 매핑 (Enum 기반)
+    # 이 딕셔너리만 수정하면 화면에 나가는 글자를 한 번에 바꿀 수 있어!
+    status_display_map = {
+        ChatStatus.ANALYZING: "분석 중",
+        ChatStatus.PENDING: "고민 중",
+        ChatStatus.PURCHASED: "구매 완료",
+        ChatStatus.ABANDONED: "구매 포기"
+    }
+
     chat_items = []
     for user_prod, prod in results:
-        # 상태값 매핑 (언니의 status 필드나 is_purchased 활용)
-        status_label = "고민 중"
+        # 🚩 우선순위 로직: 구매 여부(is_purchased)를 먼저 체크하고, 
+        # 그게 아니면 status 컬럼의 코드를 매핑해.
         if user_prod.is_purchased == 1:
-            status_label = "구매 완료"
-        elif user_prod.status == "ABANDONED": # 예시 상태값
-            status_label = "구매 포기"
+            current_status_label = "구매 완료"
+        else:
+            # DB의 status 값을 가져오되, 없으면 기본값으로 '고민 중'
+            current_status_label = status_display_map.get(user_prod.status, "고민 중")
 
         item = ChatListItem(
             user_product_id=user_prod.user_product_id,
@@ -496,12 +507,12 @@ def get_user_chat_list(db: Session, user_id: int):
             product_img=prod.product_img,
             price=prod.price,
             last_chat_time=get_time_display(user_prod.updated_at),
-            status_label=status_label,
+            status_label=current_status_label,
             is_purchased=user_prod.is_purchased
         )
         chat_items.append(item)
 
     return {
-        "latest_chat": chat_items[0], # 가장 최근 1개
-        "all_chats": chat_items       # 전체 리스트
+        "latest_chat": chat_items[0], 
+        "all_chats": chat_items      
     }
