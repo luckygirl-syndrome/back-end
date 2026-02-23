@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from . import service
 import google.generativeai as genai  # ✅ 이 줄을 추가해줘!
-from app.chat.models import ChatListResponse
+from app.chat.schemas import ChatListResponse
+from app.chat import schemas
+from app.chat.models import Chat
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -96,6 +98,16 @@ async def finalize_survey(
         user_answers=user_answers, 
         user_input="설문 완료!" # 첫 진입이므로 고정 메시지 전달
     )
+
+    # 4. ✅ AI의 첫 답변을 Chat 테이블에 저장
+    new_chat = Chat(
+        user_id=current_user.user_id,
+        user_product_id=user_product_id,
+        role="assistant",  # AI가 대답한 것이므로 assistant
+        content=first_response,
+    )
+    db.add(new_chat)
+    db.commit()
     
     return {"reply": first_response}
 
@@ -105,3 +117,20 @@ async def get_chat_list(
     current_user: User = Depends(get_current_user)
 ):
     return service.get_user_chat_list(db, current_user.user_id)
+
+@router.get("/room/{user_product_id}", response_model=schemas.ChatRoomDetailResponse)
+async def get_chat_room_detail(
+    user_product_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    특정 채팅방(상품 대화)의 상세 정보와 메세지 목록을 조회합니다.
+    """
+    # 서비스 레이어 호출
+    detail = service.get_chat_messages(db, user_product_id, current_user.user_id)
+    
+    if not detail:
+        raise HTTPException(status_code=404, detail="채팅방 정보를 찾을 수 없어요.")
+        
+    return detail

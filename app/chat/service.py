@@ -9,7 +9,8 @@ import google.generativeai as genai
 from sqlalchemy.orm import Session
 from app.chat.enum import ChatStatus
 
-from app.chat.models import ChatListItem
+from app.chat.models import Chat
+from app.chat.schemas import ChatListItem   
 from app.users.models import User
 from app.products.models import Product, UserProduct
 from app.products.parsers.item_parser import extract_features_from_url
@@ -530,4 +531,39 @@ def get_user_chat_list(db: Session, user_id: int):
     return {
         "latest_chat": chat_items[0], 
         "all_chats": chat_items      
+    }
+
+def get_chat_messages(db: Session, user_product_id: int, user_id: int):
+    # 1. 상단에 보여줄 상품 정보 가져오기
+    result = (
+        db.query(UserProduct, Product)
+        .join(Product, UserProduct.product_id == Product.product_id)
+        .filter(UserProduct.user_product_id == user_product_id)
+        .filter(UserProduct.user_id == user_id)
+        .first()
+    )
+
+    if not result:
+        return None
+
+    user_prod, prod = result
+
+    # 2. 이 상품에 대해 나눈 모든 대화(chat 테이블) 가져오기
+    messages = (
+        db.query(Chat)
+        .filter(Chat.user_product_id == user_product_id)
+        .order_by(Chat.created_at.asc()) # 시간순 정렬
+        .all()
+    )
+
+    return {
+        "user_product_id": user_prod.user_product_id, 
+        "product_name": prod.product_name,
+        "product_img": prod.product_img,
+        "price": prod.price,
+        "status_label": "고민 중", # 아까 만든 매핑 로직 적용
+        "messages": [
+            {"role": m.role, "content": m.content, "created_at": m.created_at} 
+            for m in messages
+        ]
     }

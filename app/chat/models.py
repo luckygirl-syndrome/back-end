@@ -1,26 +1,13 @@
-from sqlalchemy import Column, Integer, DateTime, BigInteger
+from sqlalchemy import Column, String, DateTime, Text, ForeignKey, BIGINT, BigInteger
 from app.core.database import Base
+from datetime import datetime  # <--- 이 줄을 꼭 추가해줘!
 
 class Chat(Base):
     __tablename__ = "chat"
 
-    chat_id = Column(BigInteger, primary_key=True)
-    user_id = Column(BigInteger)
-    created_at = Column(DateTime)
-
-from pydantic import BaseModel
-from typing import List, Optional
-from datetime import datetime
-
-class ChatListItem(BaseModel):
-    user_product_id: int
-    product_name: str
-    product_img: Optional[str]
-    price: int
-    last_chat_time: str  # "오늘", "어제" 등으로 변환해서 줄 거야
-    status_label: str    # "구매 완료", "구매 포기", "고민 중"
-    is_purchased: Optional[int]
-
-class ChatListResponse(BaseModel):
-    latest_chat: Optional[ChatListItem]
-    all_chats: List[ChatListItem]
+    chat_id = Column(BIGINT, primary_key=True, autoincrement=True)
+    user_id = Column(BIGINT, nullable=False)
+    user_product_id = Column(BIGINT, ForeignKey("user_product.user_product_id"), nullable=False)
+    role = Column(String(20), nullable=False) # "user" / "assistant"
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
