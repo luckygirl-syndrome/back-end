@@ -97,6 +97,7 @@ def get_receipt_detail(db: Session, user_id: int, user_product_id: int) -> schem
     saved_amount = prod.price if prod.price else 0
 
     data = schemas.ReceiptDetailData(
+        user_product_id=up.user_product_id,
         mall_name=prod.platform, # 플랫폼이 쇼핑몰
         brand=None, # 브랜드 컬럼이 현재 없다면 None, 또는 파싱 로직에서 추가 시 필요
         product_name=prod.product_name,

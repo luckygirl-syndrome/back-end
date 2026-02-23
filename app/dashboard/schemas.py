@@ -31,6 +31,7 @@ class ReceiptListResponse(BaseModel):
     data: List[ReceiptListItem]
 
 class ReceiptDetailData(BaseModel):
+    user_product_id: int
     mall_name: Optional[str] = None
     brand: Optional[str] = None
     product_name: str
@@ -59,3 +60,4 @@ class ConsideringListItem(BaseModel):
 class ConsideringListResponse(BaseModel):
     status: str
     data: List[ConsideringListItem]
+

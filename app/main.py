@@ -8,6 +8,7 @@ from app.users import models # ✅ 모델을 불러와야 테이블을 만듭니
 from app.products import router as products_router
 from app.chat import router as chat_router
 from app.dashboard import home_router
+from app.chat.after_chat.router import router as after_chat_router
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -35,6 +36,7 @@ app.add_middleware(
 app.include_router(user_router)
 app.include_router(products_router.router)
 app.include_router(chat_router.router) # 챗봇 라우터도 포함시킵니다.
+app.include_router(after_chat_router) # 채팅 후 API 포함
 # `app.include_router(home_router.router)` is including the routes defined in the `home_router` router
 # into the FastAPI application `app`. This allows the endpoints defined in the `home_router` to be
 # accessible and handled by the FastAPI application when it is running. This line of code ensures that
