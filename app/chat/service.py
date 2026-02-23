@@ -88,7 +88,7 @@ def clean_persona_code(user):
     # 혹시라도 글자가 부족하면 그냥 원본 대문자 반환 (에러 방지)
     return code
 
-def parse_and_save_product(db: Session, url: str, user: User):
+def parse_and_save_product(db: Session, url: str, user: User, user_product_id: int = None):
     try:
         # 1. 페르소나 코드 정리
         user_persona_code = clean_persona_code(user) 
@@ -124,13 +124,29 @@ def parse_and_save_product(db: Session, url: str, user: User):
             )
             db.add(product); db.flush()
 
-        # 4. 유저-상품 매핑 저장
-        user_prod = UserProduct(
-            user_id=user.user_id, product_id=product.product_id,
-            user_type=user_persona_code, risk_score_1=impulse_score,
-            status="IN_PROGRESS", preference_score=total_pref_score
-        )
-        db.add(user_prod); db.commit()
+        # 4. 유저-상품 매핑 갱신 (또는 저장)
+        if user_product_id:
+            user_prod = db.query(UserProduct).filter(UserProduct.user_product_id == user_product_id).first()
+            if user_prod:
+                user_prod.product_id = product.product_id
+                user_prod.risk_score_1 = impulse_score
+                user_prod.preference_score = total_pref_score
+                user_prod.status = "IN_PROGRESS"
+                db.commit()
+            else:
+                user_prod = UserProduct(
+                    user_id=user.user_id, product_id=product.product_id,
+                    user_type=user_persona_code, risk_score_1=impulse_score,
+                    status="IN_PROGRESS", preference_score=total_pref_score
+                )
+                db.add(user_prod); db.commit()
+        else:
+            user_prod = UserProduct(
+                user_id=user.user_id, product_id=product.product_id,
+                user_type=user_persona_code, risk_score_1=impulse_score,
+                status="IN_PROGRESS", preference_score=total_pref_score
+            )
+            db.add(user_prod); db.commit()
 
         # 🔥 [핵심 추가] 실제 수치 데이터들 모으기 (value: null 방지용)
         # result 딕셔너리에 들어있는 실제 값들을 feature_key 이름에 맞춰 정리해
@@ -155,7 +171,7 @@ def parse_and_save_product(db: Session, url: str, user: User):
         }
     
         # Redis에 저장 (한글 깨짐 방지 위해 ensure_ascii=False 추천)
-        cache_key = f"analysis:{user.user_id}:{product.product_id}"
+        cache_key = f"analysis:{user_prod.user_product_id}"
         redis_client.setex(cache_key, 3600, json.dumps(details, ensure_ascii=False))
 
         # 5. 프롬프트 데이터 조립 (터미널 출력용 리포트 데이터)
@@ -203,24 +219,24 @@ def print_analysis_report(user_id, persona, p_name, pref, risk, prompt_data):
     print(f" ✅ 분석 및 프롬프트 준비 완료 (Timestamp: {datetime.datetime.now().strftime('%H:%M:%S')})")
     print("="*80 + "\n")
 
-async def get_chat_response(db: Session, user_id: int, product_id: int, user_answers: dict, user_input: str, history: list = []):
+async def get_chat_response(db: Session, user_id: int, user_product_id: int, user_answers: dict, user_input: str, history: list = []):
     # 1. DB 레코드 조회
     record = db.query(UserProduct).filter(
-        UserProduct.user_id == user_id,
-        UserProduct.product_id == product_id
-    ).order_by(UserProduct.created_at.desc()).first()
-
-    product = db.query(Product).filter(Product.product_id == product_id).first()
-    user = db.query(User).filter(User.user_id == user_id).first()
-
-    if not record or not product or not user:
-        return "데이터를 불러오는 데 실패했어. 다시 시도해줄래? 🧐"
+        UserProduct.user_product_id == user_product_id,
+        UserProduct.user_id == user_id
+    ).first()
 
     if not record:
         return "분석 기록이 없네! 다시 URL을 넣어줄래? 🧐"
 
+    product = db.query(Product).filter(Product.product_id == record.product_id).first()
+    user = db.query(User).filter(User.user_id == user_id).first()
+
+    if not product or not user:
+        return "데이터를 불러오는 데 실패했어. 다시 시도해줄래? 🧐"
+
     # 🚩 [NEW] 캐시 키 설정 및 완성된 JSON 캐시 확인
-    cache_key_json = f"prompt_json:{user_id}:{product_id}"
+    cache_key_json = f"prompt_json:{user_product_id}"
     cached_json = redis_client.get(cache_key_json)
     
     final_input_json = None
@@ -236,7 +252,7 @@ async def get_chat_response(db: Session, user_id: int, product_id: int, user_ans
     # 아직 캐싱된 게 없다면 (첫 호출), 처음 조립을 시작함
     if not final_input_json:
         # 🚩 [기존 로직] 레디스에서 부분 상세 데이터 꺼내기
-        cache_key = f"analysis:{user_id}:{product_id}"
+        cache_key = f"analysis:{user_product_id}"
         cached_raw = redis_client.get(cache_key)
         
         if not cached_raw:

@@ -5,3 +5,5 @@ venv/
 .env
 student_distilled_e5_rule/
 *.pyc
+**/__pycache__/
+*.pyc
