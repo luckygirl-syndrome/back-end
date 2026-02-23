@@ -89,6 +89,7 @@ async def finalize_survey(
 
     print(f"🚀 DEBUG: 불러온 상품 ID -> {last_request.product_id}")
     
+    user_input = "설문 완료!"
     # 3. 챗봇 답변 생성 시작
     # 서비스 레이어에서 이제 언니가 원했던 그 '최종 JSON' 형식을 만들어서 Gemini를 호출함
     first_response = await service.get_chat_response(
@@ -96,18 +97,26 @@ async def finalize_survey(
         user_id=current_user.user_id, 
         user_product_id=user_product_id, 
         user_answers=user_answers, 
-        user_input="설문 완료!" # 첫 진입이므로 고정 메시지 전달
+        user_input=user_input # 첫 진입이므로 고정 메시지 전달
     )
 
-    # 4. ✅ AI의 첫 답변을 Chat 테이블에 저장
-    new_chat = Chat(
+    # 4. ✅ 유저의 첫 메시지 저장
+    service.save_chat_message(
+        db=db,
         user_id=current_user.user_id,
         user_product_id=user_product_id,
-        role="assistant",  # AI가 대답한 것이므로 assistant
-        content=first_response,
+        role="user",
+        content=user_input
     )
-    db.add(new_chat)
-    db.commit()
+
+    # 5. ✅ AI의 첫 답변 저장
+    service.save_chat_message(
+        db=db,
+        user_id=current_user.user_id,
+        user_product_id=user_product_id,
+        role="assistant",
+        content=first_response
+    )
     
     return {"reply": first_response}
 
@@ -134,3 +143,19 @@ async def get_chat_room_detail(
         raise HTTPException(status_code=404, detail="채팅방 정보를 찾을 수 없어요.")
         
     return detail
+
+@router.post("/exit/{user_product_id}")
+async def exit_chat(
+    user_product_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    채팅을 종료 상태(FINISHED)로 변경합니다.
+    """
+    success = service.finish_chat(db, user_product_id, current_user.user_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="요청한 채팅 방을 찾을 수 없어요.")
+        
+    return {"status": "SUCCESS", "message": "채팅이 종료되었습니다."}

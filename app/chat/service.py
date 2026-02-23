@@ -486,10 +486,28 @@ def get_time_display(dt: datetime) -> str:
     return f"{diff.days}일 전"
 
 def get_user_chat_list(db: Session, user_id: int):
-    # 1. UserProduct와 Product를 조인해서 최신 업데이트순으로 가져오기
+    # 1. 각 product_id별로 가장 최신(updated_at 기준)의 user_product_id를 찾는 서브쿼리
+    from sqlalchemy import func
+    
+    subquery = (
+        db.query(
+            UserProduct.product_id,
+            func.max(UserProduct.updated_at).label("max_updated_at")
+        )
+        .filter(UserProduct.user_id == user_id)
+        .group_by(UserProduct.product_id)
+        .subquery()
+    )
+
+    # 2. 서브쿼리와 조인하여 각 상품별 최신 채팅방 레코드만 가져오기
     results = (
         db.query(UserProduct, Product)
         .join(Product, UserProduct.product_id == Product.product_id)
+        .join(
+            subquery,
+            (UserProduct.product_id == subquery.c.product_id) &
+            (UserProduct.updated_at == subquery.c.max_updated_at)
+        )
         .filter(UserProduct.user_id == user_id)
         .order_by(UserProduct.updated_at.desc())
         .all()
@@ -501,8 +519,9 @@ def get_user_chat_list(db: Session, user_id: int):
     # 2. 화면에 보여줄 한글 라벨 매핑 (Enum 기반)
     # 이 딕셔너리만 수정하면 화면에 나가는 글자를 한 번에 바꿀 수 있어!
     status_display_map = {
-        ChatStatus.ANALYZING: "분석 중",
+        ChatStatus.ANALYZING: "고민 중",
         ChatStatus.PENDING: "고민 중",
+        ChatStatus.FINISHED: "고민 중",
         ChatStatus.PURCHASED: "구매 완료",
         ChatStatus.ABANDONED: "구매 포기"
     }
@@ -533,8 +552,36 @@ def get_user_chat_list(db: Session, user_id: int):
         "all_chats": chat_items      
     }
 
+def save_chat_message(db: Session, user_id: int, user_product_id: int, role: str, content: str):
+    """DB와 Redis 양쪽에 채팅 메시지를 저장함"""
+    # 1. DB 저장
+    new_chat = Chat(
+        user_id=user_id,
+        user_product_id=user_product_id,
+        role=role,
+        content=content,
+        created_at=datetime.now()
+    )
+    db.add(new_chat)
+    db.commit()
+    db.refresh(new_chat)
+
+    # 2. Redis 저장 (리스트 형태: chat_messages:{user_product_id})
+    cache_key = f"chat_messages:{user_product_id}"
+    msg_data = {
+        "role": role,
+        "content": content,
+        "created_at": new_chat.created_at.isoformat()
+    }
+    
+    # 리스트 끝에 추가하고, 1시간(3600초) 만료 설정
+    redis_client.rpush(cache_key, json.dumps(msg_data, ensure_ascii=False))
+    redis_client.expire(cache_key, 3600)
+    
+    return new_chat
+
 def get_chat_messages(db: Session, user_product_id: int, user_id: int):
-    # 1. 상단에 보여줄 상품 정보 가져오기
+    # 1. 상단에 보여줄 상품 정보 가져오기 (이건 DB에서 가져옴)
     result = (
         db.query(UserProduct, Product)
         .join(Product, UserProduct.product_id == Product.product_id)
@@ -548,22 +595,72 @@ def get_chat_messages(db: Session, user_product_id: int, user_id: int):
 
     user_prod, prod = result
 
-    # 2. 이 상품에 대해 나눈 모든 대화(chat 테이블) 가져오기
-    messages = (
-        db.query(Chat)
-        .filter(Chat.user_product_id == user_product_id)
-        .order_by(Chat.created_at.asc()) # 시간순 정렬
-        .all()
-    )
+    # 2. Redis에서 메시지 목록 먼저 확인
+    cache_key = f"chat_messages:{user_product_id}"
+    cached_msgs = redis_client.lrange(cache_key, 0, -1)
+
+    if cached_msgs:
+        print(f"✅ Redis에서 채팅 메시지 {len(cached_msgs)}개를 불러왔어! (Key: {cache_key})")
+        messages = [json.loads(m) for m in cached_msgs]
+    else:
+        # 3. Redis에 없으면 DB에서 가져오기
+        print(f"⚠️ Redis에 메시지가 없어 DB에서 가져오는 중... (Key: {cache_key})")
+        db_messages = (
+            db.query(Chat)
+            .filter(Chat.user_product_id == user_product_id)
+            .order_by(Chat.created_at.asc())
+            .all()
+        )
+        
+        messages = []
+        for m in db_messages:
+            msg_dict = {
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat()
+            }
+            messages.append(msg_dict)
+            # 가져온 김에 Redis에도 채워두기
+            redis_client.rpush(cache_key, json.dumps(msg_dict, ensure_ascii=False))
+        
+        if messages:
+            redis_client.expire(cache_key, 3600)
+
+    # 4. 상태 라벨 매핑 (get_user_chat_list 로직 재활용)
+    status_display_map = {
+        ChatStatus.ANALYZING: "고민 중",
+        ChatStatus.PENDING: "고민 중",
+        ChatStatus.FINISHED: "고민 중",
+        ChatStatus.PURCHASED: "구매 완료",
+        ChatStatus.ABANDONED: "구매 포기"
+    }
+    
+    if user_prod.is_purchased == 1:
+        current_status_label = "구매 완료"
+    else:
+        current_status_label = status_display_map.get(user_prod.status, "고민 중")
 
     return {
         "user_product_id": user_prod.user_product_id, 
         "product_name": prod.product_name,
         "product_img": prod.product_img,
         "price": prod.price,
-        "status_label": "고민 중", # 아까 만든 매핑 로직 적용
-        "messages": [
-            {"role": m.role, "content": m.content, "created_at": m.created_at} 
-            for m in messages
-        ]
+        "status_label": current_status_label,
+        "messages": messages
     }
+
+def finish_chat(db: Session, user_product_id: int, user_id: int):
+    """채팅방을 종료 상태(FINISHED)로 변경"""
+    record = (
+        db.query(UserProduct)
+        .filter(UserProduct.user_product_id == user_product_id)
+        .filter(UserProduct.user_id == user_id)
+        .first()
+    )
+    
+    if not record:
+        return False
+        
+    record.status = ChatStatus.FINISHED
+    db.commit()
+    return True
