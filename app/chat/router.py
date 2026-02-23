@@ -100,16 +100,33 @@ async def finalize_survey(
         user_input=user_input # 첫 진입이므로 고정 메시지 전달
     )
 
-    # 4. ✅ 유저의 첫 메시지 저장
-    service.save_chat_message(
-        db=db,
-        user_id=current_user.user_id,
-        user_product_id=user_product_id,
-        role="user",
-        content=user_input
-    )
+    # 4. ✅ 유저의 설문 질문과 답변을 쌍으로 묶어서 사용자/AI 메시지로 저장
+    survey_pairs = [
+        ("이거 장바구니/찜에 담은 지 얼마나 됐어?", service.get_q1_text(user_answers.get('q1'))),
+        ("나한테 왜 연락한 거야?", service.get_q2_text(user_answers.get('q2'))),
+        ("이 옷, 이미 거의 사기로 마음 정한 상태야? 아니면 아직 확신이 부족해?", service.get_q3_text(user_answers.get('q3'))),
+        ("이 옷의 어떤 점이 네 마음을 뺏었어?", service.get_qc_text(user_answers.get('qc')))
+    ]
 
-    # 5. ✅ AI의 첫 답변 저장
+    for question, answer in survey_pairs:
+        # 질문 저장 (assistant)
+        service.save_chat_message(
+            db=db,
+            user_id=current_user.user_id,
+            user_product_id=user_product_id,
+            role="assistant",
+            content=question
+        )
+        # 답변 저장 (user)
+        service.save_chat_message(
+            db=db,
+            user_id=current_user.user_id,
+            user_product_id=user_product_id,
+            role="user",
+            content=answer
+        )
+
+    # 5. ✅ AI의 첫 분석 답변 저장
     service.save_chat_message(
         db=db,
         user_id=current_user.user_id,
