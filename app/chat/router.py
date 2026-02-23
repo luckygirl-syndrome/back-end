@@ -57,16 +57,21 @@ async def finalize_survey(
     # 1. Pydantic 모델을 dict로 변환 (q1, q2, q3, qc 포함)
     user_answers = request.model_dump()
 
-    # 2. 이 유저가 가장 최근에 분석 요청한 '성공한' 상품 분석 기록 찾기
+   # 2. 이 유저가 요청한 '가장 최근' 상품 분석 기록 찾기 (상태 상관없이!)
     last_request = db.query(UserProduct).filter(
-        UserProduct.user_id == current_user.user_id,
-        UserProduct.status == "COMPLETED"
+        UserProduct.user_id == current_user.user_id
+        # status == "COMPLETED" 조건을 과감히 삭제!
     ).order_by(UserProduct.created_at.desc()).first()
 
     if not last_request:
-        # 분석 중이거나 요청이 없는 경우
-        raise HTTPException(status_code=404, detail="아직 분석 결과가 안 나왔거나 요청한 상품이 없어! 조금만 기다려줘.")
+        raise HTTPException(status_code=404, detail="요청한 상품 기록이 없어요!")
 
+    # 만약 '분석 완료'를 나타내는 별도의 필드(예: is_analyzed)가 있다면 여기서 체크
+    # if not last_request.is_analyzed:
+    #     raise HTTPException(status_code=202, detail="아직 데이터 분석 중이에요!")
+
+    print(f"🚀 DEBUG: 불러온 최신 상품 ID -> {last_request.product_id}")
+    
     # 3. 챗봇 답변 생성 시작
     # 서비스 레이어에서 이제 언니가 원했던 그 '최종 JSON' 형식을 만들어서 Gemini를 호출함
     first_response = await service.get_chat_response(

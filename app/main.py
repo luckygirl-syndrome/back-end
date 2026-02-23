@@ -1,3 +1,4 @@
+import redis
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -48,11 +49,18 @@ app.include_router(home_router.router)
 def root():
     return {"message": f"Welcome to {settings.PROJECT_NAME} API"}
 
-# 우리가 아까 만든 헬스체크 API
+# 헬스체크 API (DB + Redis)
 @app.get("/api/health")
 def health_check(db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
-        return {"status": "ok", "db": "connected"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
+
+    try:
+        r = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=0)
+        r.ping()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Redis connection error: {str(e)}")
+
+    return {"status": "ok", "db": "connected", "redis": "connected"}

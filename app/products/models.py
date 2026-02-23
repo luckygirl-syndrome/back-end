@@ -49,10 +49,9 @@ class UserProduct(Base):
     risk_score_2 = Column(Integer)
     preference_score = Column(Integer, default=50)
     is_purchased = Column(TINYINT(1))
-    
+    prompt_data = Column(Text)  # ✅ 챗봇에게 넘길 최종 완전체 JSON 캐싱
     # ✅ 2주 후 피드백 결과 저장용 컬럼
     feedback_text = Column(Text)
     feedback_rating = Column(Integer)
-    
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)

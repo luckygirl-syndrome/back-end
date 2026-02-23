@@ -12,24 +12,34 @@ from app.products.models import Product, UserProduct
 from app.products.parsers.item_parser import extract_features_from_url
 from app.chat.logic.impulse_calculator import analyze_product_risk
 from app.chat.logic.final_prefer import infer_all
+from app.chat.logic.user_survey import determine_mode
 from .prompt import TobabaPromptBuilder
-from .constants import IMPULSE_GUIDE_DATA
+from .constants import IMPULSE_GUIDE_DATA, SURVEY_TEXT_MAPPING, DEFAULT_VALUES, SURVEY_SCORE_TABLE, PRIOR_TEXT, PERSONAL_POS_TEXT, PERSONAL_RISK_TEXT
 
 import redis
 import json
 
-# Redis 연결 (설정에 따라 주소 변경)
+from app.core.config import settings
+
+# Redis 연결 (환경변수 REDIS_HOST, REDIS_PORT 사용 → Docker에서는 redis 서비스명으로 연결)
 redis_client = redis.Redis(
-    host='localhost', 
-    port=6379, 
-    db=0, 
-    decode_responses=True  # 이걸 해야 문자열로 바로 읽어와!
+    host=settings.REDIS_HOST,
+    port=settings.REDIS_PORT,
+    db=0,
+    decode_responses=True,
 )
 
-# --- 상단 전역 설정 ---
-# 1. 현재 파일(service.py)의 위치를 기준으로 프로젝트 루트 폴더 찾기
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 1. 현재 파일(service.py) 위치: app/chat/service.py
+# 2. abspath(__file__) -> /home/ubuntu/Back-end/app/chat/service.py
+# 3. 3번 올라가야 /home/ubuntu/Back-end/ (루트)가 나옴
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 4. 이제 모델 폴더 위치를 지정
+# 만약 모델 폴더가 Back-end/models/artifacts_prior 라면:
 PRIOR_MODEL_DIR = os.path.join(BASE_DIR, "models", "artifacts_prior")
+
+# 5. (선택) 제대로 잡혔는지 터미널에 찍어보기 (서버 로그 확인용)
+print(f"🚀 DEBUG: PRIOR_MODEL_DIR is -> {PRIOR_MODEL_DIR}")
 
 # 챗봇 설명용 한글 매핑
 FEATURE_KO = {
@@ -40,90 +50,7 @@ FEATURE_KO = {
     'sim_bundle': '1+1/묶음 할인', 'sim_confidence': 'MD추천/보증'
 }
 
-def get_logic_gate_mode(user_answers: dict):
-    # 1. 질문별 스코어 테이블 설정
-    # (Brake, Decider) 순서
-    q1_table = {1: (2, 0), 2: (1, 0), 3: (0, 1), 4: (0, 2), 5: (0, 3)}
-    q2_table = {1: (2, 0), 2: (1, 0), 3: (0, 2), 4: (0, 1)}
-    q3_table = {1: (0, 1), 2: (1, 0), 3: (2, 0), 4: (0, 2)}
-    
-    # 2. 총점 계산
-    b_score = q1_table[user_answers['q1']][0] + q2_table[user_answers['q2']][0] + q3_table[user_answers['q3']][0]
-    d_score = q1_table[user_answers['q1']][1] + q2_table[user_answers['q2']][1] + q3_table[user_answers['q3']][1]
 
-    # 3. [최종 로직 결정] 동점이면 DECIDER!
-    if b_score > d_score:
-        mode = "BRAKE"
-    elif d_score > b_score:
-        mode = "DECIDER"
-    else:
-        mode = "DECIDER" # 동점일 때 처리
-        
-    return mode, b_score, d_score
-
-async def get_chat_response(db: Session, user_id: int, user_answers: dict, user_input: str, history: list = []):
-    # 1. DB 유저 정보
-    user = db.query(User).filter(User.user_id == user_id).first()
-    
-    # 2. 로직 게이트 (모드/점수 확정)
-    mode, b_score, d_score = get_logic_gate_mode(user_answers)
-    
-    # QC 매칭
-    qc_map = {1:"가성비", 2:"시즌오프 세일 / 품절 임박", 3:"요즘 유행템 같아서, 연예인이 입었대서", 4:"퀄리티가 좋을 것 같아서", 5:"MD, 인플루언서가 픽했대서", 6:"모델이 입은 핏이 예뻐서", 7:"배송이 빨리 와야해서"}
-    key_appeal_text = qc_map.get(user_answers['qc'], "디자인")
-    
-    # 3. 레벨 확정 및 가이드 데이터 추출
-    level_num = min(5, max(1, b_score))
-    level_key = f"Level {level_num}"
-    
-    # [핵심] 매핑 없이 해당 레벨의 모든 가이드 문장 셋을 가져옴
-    # 언니가 constants.py에 정의한 "잠깐! 너 지금..." 같은 문장들이 여기 다 들어있음
-    level_guides = IMPULSE_GUIDE_DATA[level_key]
-
-    # 4. 언니 빌더용 데이터 조립 (Input JSON)
-    data = {
-        "user_context": {
-            "persona_type": user.persona_type,
-            "target_style": "유저의 추구미"
-        },
-        "product_context": {
-            "name": "상의", 
-            "brand": "아캄",
-            "price": 100000
-        },
-        "mode_block": {"current_mode": mode},
-        "impulse_block": {
-            "impulse_score": b_score * 20,
-            # 매핑 로직 삭제: 레벨에 해당하는 문장 딕셔너리를 통째로 넘김
-            # LLM이 'impulse_reason_top2' 내의 문장들을 보고 유저 답변(qc)과 대조해서 발화함
-            "impulse_reason_top2": [
-                {"feature_key": k, "guide": v} for k, v in level_guides["features"].items()
-            ]
-        },
-        "preference_block": {
-            "total_score": d_score * 20,
-            "personal_score": 50,
-            "mixing": {"preference_priority": "personal"}
-        },
-        "conversation_block": {
-            "key_appeal": key_appeal_text,
-            "cart_duration": f"선택지 {user_answers['q1']}번 기간"
-        },
-        "strategy_matrix": {
-            "goal": level_guides["goal"],
-            "strategy": level_guides["strategy"]
-        }
-    }
-
-    # 5. 프롬프트 빌드 및 실행
-    builder = TobabaPromptBuilder(data, user_input=user_input, history=history)
-    model = genai.GenerativeModel(
-        model_name='gemini-1.5-flash',
-        system_instruction=builder.get_system_instruction()
-    )
-    
-    response = model.generate_content(builder.build_dynamic_context())
-    return response.text
 
 def clean_persona_code(user):
     """프로젝트 표준 순서(1:D/N, 2:S/A, 3:M/T)에 맞춰 페르소나 코드 정렬"""
@@ -163,18 +90,15 @@ def clean_persona_code(user):
 
 def parse_and_save_product(db: Session, url: str, user: User):
     try:
-        # 1. 일단 우리끼리 쓸 '순서 정렬된' 깔끔한 코드 생성 (예: DSM)
-        user_persona_code = clean_persona_code(user) # 위에서 만든 정렬 로직 사용 (하이픈 제거 버전)
-
-        # 2. 🔥 모델한테 줄 때만 하이픈 살짝 끼워넣기
-        # DSM -> D-S-M
+        # 1. 페르소나 코드 정리
+        user_persona_code = clean_persona_code(user) 
         model_ready_code = f"{user_persona_code[0]}-{user_persona_code[1]}-{user_persona_code[2]}"
 
+        # URL에서 특징 추출
         result = extract_features_from_url(url)
         if not result or result.get("product_name") == "Error": return None
 
         # 2. 분석 (위험도 & 선호도)
-        # 💡 result 안에 이미 모든 심리 축과 정규화된 데이터가 있어서 그대로 활용!
         risk_res = analyze_product_risk(result, model_ready_code)
         pref_out = infer_all(item_json=result, persona_type=model_ready_code, prior_dir=PRIOR_MODEL_DIR)
         
@@ -189,11 +113,12 @@ def parse_and_save_product(db: Session, url: str, user: User):
                 product_name=result.get('product_name', 'Unknown'),
                 platform=result.get('platform', 'Unknown'),
                 category=result.get('category', '기타'),
-                price=int(result.get('discounted_price', 0)), # ✅ 키값 통일
+                free_shipping=bool(result.get('free_shipping', 0)),
+                price=int(result.get('discounted_price', 0)),
                 discount_rate=float(result.get('discount_rate', 0)),
                 is_direct_shipping=bool(result.get('is_direct_shipping', 0)),
                 review_count=int(result.get('review_count', 0)),
-                review_score=float(result.get('review_score', 0.0)), # ✅ rating -> review_score
+                review_score=float(result.get('review_score', 0.0)),
                 product_likes=str(result.get('product_likes', '0')),
                 **{col: result.get(col, 0) for col in ["sim_temptation", "sim_trend_hype", "sim_fit_anxiety", "sim_quality_logic", "sim_bundle", "sim_confidence"]}
             )
@@ -207,35 +132,49 @@ def parse_and_save_product(db: Session, url: str, user: User):
         )
         db.add(user_prod); db.commit()
 
-        # 캐시용 데이터 조립
+        # 🔥 [핵심 추가] 실제 수치 데이터들 모으기 (value: null 방지용)
+        # result 딕셔너리에 들어있는 실제 값들을 feature_key 이름에 맞춰 정리해
+        feature_values = {
+            "discount_rate": result.get('discount_rate', 0),
+            "review_score": result.get('review_score', 0),
+            "review_count": result.get('review_count', 0),
+            "product_likes": result.get('product_likes', 0),
+            "price": result.get('discounted_price', 0),
+            "free_shipping": result.get('free_shipping', 0) 
+        }
+
+        # 캐시용 데이터 조립 (details에 feature_values 추가!)
         details = {
             "top_2_causes": risk_res.get('top_2_causes', []),
             "prior_reasons": pref_out.get('prior_reason_top2', []),
             "personal_reasons": pref_out.get('personal_reason_top2', []),
             "prior_score": pref_out.get('prior_score', 0),
-            "personal_score": pref_out.get('personal_score', 0)
+            "personal_score": pref_out.get('personal_score', 0),
+            "personal_reason_type": pref_out.get('personal_reason_type', 'neutral'),
+            "feature_values": feature_values # 🚩 이 녀석이 나중에 value 자리에 들어감!
         }
     
-        # Redis에 저장 (3600초 = 1시간 유지)
+        # Redis에 저장 (한글 깨짐 방지 위해 ensure_ascii=False 추천)
         cache_key = f"analysis:{user.user_id}:{product.product_id}"
-        redis_client.setex(cache_key, 3600, json.dumps(details))
+        redis_client.setex(cache_key, 3600, json.dumps(details, ensure_ascii=False))
 
-        # 5. 프롬프트 데이터 조립
+        # 5. 프롬프트 데이터 조립 (터미널 출력용 리포트 데이터)
         prompt_data = {
-            "user_context": {"persona_type": user_persona_code, "target_style": getattr(user, 'target_style', '심플'), "n_effective": pref_out["n_effective"]},
+            "user_context": {"persona_type": user_persona_code, "target_style": getattr(user, 'chu_gu_me', '심플'), "n_effective": pref_out["n_effective"]},
             "analysis_result": {"total_prefer_score": total_pref_score, "impulse_score": impulse_score, "alpha_value": pref_out["alpha"]},
-            "prior_analysis": {"score": pref_out["prior_score"], "top_reasons": [{"feature": r[0], "value": r[1]} for r in pref_out["prior_reason_top2"]]},
-            "personal_analysis": {"score": pref_out["personal_score"], "reason_type": pref_out["personal_reason_type"], "top_reasons": [{"feature": r[0], "value": r[1]} for r in pref_out["personal_reason_top2"]]},
-            "impulse_block": {"score": impulse_score, "label": risk_res["risk_label"], "level": risk_res["risk_level"], "top_causes": [{"name": c["feature_name"], "detail": c["detail"]} for c in risk_res["top_2_causes"]]}
+            "prior_analysis": {"score": pref_out["prior_score"], "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["prior_reason_top2"]]},
+            "personal_analysis": {"score": pref_out["personal_score"], "reason_type": pref_out["personal_reason_type"], "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["personal_reason_top2"]]},
+            "impulse_block": {"score": impulse_score, "label": risk_res["risk_label"], "level": risk_res["risk_level"], "top_causes": [{"name": c["feature_name"], "value": feature_values.get(c["feature_key"]), "detail": c["detail"]} for c in risk_res["top_2_causes"]]}
         }
 
-        # 6. 터미널 리포트 출력 (prompt_data를 추가로 넘겨줌!)
+        # 6. 터미널 리포트 출력
         print_analysis_report(user.user_id, user_persona_code, product.product_name, pref_out, risk_res, prompt_data)
 
         return prompt_data
 
     except Exception as e:
         db.rollback()
+        import traceback
         print(f"❌ 에러 발생:\n{traceback.format_exc()}")
         return None
 
@@ -265,13 +204,12 @@ def print_analysis_report(user_id, persona, p_name, pref, risk, prompt_data):
     print("="*80 + "\n")
 
 async def get_chat_response(db: Session, user_id: int, product_id: int, user_answers: dict, user_input: str, history: list = []):
-   # 1. DB 레코드 조회
+    # 1. DB 레코드 조회
     record = db.query(UserProduct).filter(
         UserProduct.user_id == user_id,
         UserProduct.product_id == product_id
     ).order_by(UserProduct.created_at.desc()).first()
 
-    # 🚩 '...'을 실제 조건으로 교체!
     product = db.query(Product).filter(Product.product_id == product_id).first()
     user = db.query(User).filter(User.user_id == user_id).first()
 
@@ -281,84 +219,149 @@ async def get_chat_response(db: Session, user_id: int, product_id: int, user_ans
     if not record:
         return "분석 기록이 없네! 다시 URL을 넣어줄래? 🧐"
 
-    # 🚩 [핵심: 레디스에서 상세 데이터 꺼내기]
-    cache_key = f"analysis:{user_id}:{product_id}"
-    cached_raw = redis_client.get(cache_key)
+    # 🚩 [NEW] 캐시 키 설정 및 완성된 JSON 캐시 확인
+    cache_key_json = f"prompt_json:{user_id}:{product_id}"
+    cached_json = redis_client.get(cache_key_json)
     
-    if not cached_raw:
-        # 캐시가 없으면(만료됐으면) 최소한의 기본값이라도 세팅해
-        print(f"⚠️ 캐시 만료됨: {cache_key}")
-        details = {
-            "top_2_causes": [], 
-            "prior_reasons": [], 
-            "personal_reasons": [],
-            "prior_score": 0,
-            "personal_score": 0
-        }
-    else:
-        details = json.loads(cached_raw)
+    final_input_json = None
+    if cached_json:
+        final_input_json = json.loads(cached_json)
+        print(f"✅ 레디스에서 완성된 JSON을 불러왔어! (Key: {cache_key_json})")
+    elif record.prompt_data:
+        final_input_json = json.loads(record.prompt_data)
+        # Redis에도 올려두기
+        redis_client.setex(cache_key_json, 3600, json.dumps(final_input_json, ensure_ascii=False))
+        print(f"✅ DB에서 완성된 JSON을 불러와 레디스에 올렸어! (Key: {cache_key_json})")
 
-    # 2. 로직 게이트 및 가이드 데이터 추출
-    mode, b_score, d_score = get_logic_gate_mode(user_answers)
-    level_num = min(5, max(1, b_score))
-    level_key = f"Level {level_num}"
-    guide_info = IMPULSE_GUIDE_DATA.get(level_key)
+    # 아직 캐싱된 게 없다면 (첫 호출), 처음 조립을 시작함
+    if not final_input_json:
+        # 🚩 [기존 로직] 레디스에서 부분 상세 데이터 꺼내기
+        cache_key = f"analysis:{user_id}:{product_id}"
+        cached_raw = redis_client.get(cache_key)
+        
+        if not cached_raw:
+            print(f"⚠️ 기존 상세 캐시 만료됨: {cache_key}")
+            details = {
+                "top_2_causes": [], 
+                "prior_reasons": [], 
+                "personal_reasons": [],
+                "prior_score": 0,
+                "personal_score": 0,
+                "feature_values": {}
+            }
+        else:
+            details = json.loads(cached_raw)
 
-    # 3. [최종 JSON] 조립 (레디스 데이터 활용)
-    final_input_json = {
-        "user_context": {
-            "persona_type": record.user_type,
-            "target_style": getattr(user, 'target_style', '심플')
-        },
-        "product_context": {
-            "name": product.product_name,
-            "brand": product.platform,
-            "price": product.price,
-            "mall": product.platform,
-            "category": product.category
-        },
-        "mode_block": { "current_mode": mode },
+        # 2. 모드 결정 및 가이드 데이터 추출
+        mode = determine_mode([
+            {"q_id": 1, "answer_id": user_answers.get('q1')},
+            {"q_id": 2, "answer_id": user_answers.get('q2')},
+            {"q_id": 3, "answer_id": user_answers.get('q3')}
+        ])
         
-        "impulse_block": {
-            "impulse_score": record.risk_score_1,
-            "intervention_level": level_num,
-            "impulse_reason_top2": [
-                {
-                    "feature_key": cause["feature_name"],
-                    "guide": guide_info["features"].get(cause["feature_name"], "이 부분 주의깊게 봐!")
-                } for cause in details.get('top_2_causes', [])
-            ]
-        },
+        b_score = SURVEY_SCORE_TABLE["q1"].get(user_answers.get('q1'), (0,0))[0] + \
+                  SURVEY_SCORE_TABLE["q2"].get(user_answers.get('q2'), (0,0))[0] + \
+                  SURVEY_SCORE_TABLE["q3"].get(user_answers.get('q3'), (0,0))[0]
         
-        "preference_block": {
-            "total_score": record.preference_score,
-            "mixing": { "preference_priority": "personal" },
-            "prior_score": details.get('prior_score', 0),
-            "prior_reason_top2": [
-                {"feature_key": r[0], "guide": f"너랑 비슷한 유형은 '{r[0]}'을 중요하게 봐."} 
-                for r in details.get('prior_reasons', [])
-            ],
-            "personal_score": details.get('personal_score', 0),
-            "personal_reason_top2": [
-                {"feature_key": r[0], "guide": f"이 옷의 '{r[0]}' 조건은 네 스타일이랑 좀 달라."}
-                for r in details.get('personal_reasons', [])
-            ]
-        },
+        level_num = min(5, max(1, b_score))
+        level_key = f"Level {level_num}"
+        guide_info = IMPULSE_GUIDE_DATA.get(level_key)
+
+        persona_suffix = record.user_type[-1].lower()
+        persona_prefix = "default_" if persona_suffix == 't' else "myway_"
         
-        "conversation_block": {
-            "cart_duration": get_q1_text(user_answers['q1']),
-            "contact_reason": get_q2_text(user_answers['q2']),
-            "purchase_certainty": get_q3_text(user_answers['q3']),
-            "key_appeal": get_qc_text(user_answers['qc'])
-        },
-        
-        "strategy_matrix": {
-            "level": level_num,
-            "label": guide_info["label"],
-            "goal": guide_info["goal"],
-            "strategy": guide_info["strategy"]
+        p_type = details.get('personal_reason_type', 'positive')
+        personal_text_dict = PERSONAL_RISK_TEXT if p_type == 'risk' else PERSONAL_POS_TEXT
+
+        final_input_json = {
+            "meta": {
+                "trace_id": str(re.sub(r'[^a-zA-Z0-9]', '', str(datetime.datetime.now().timestamp()))),
+                "timestamp": datetime.datetime.now().isoformat()
+            },
+            "user_context": {
+                "persona_type": record.user_type,
+                "frequent_malls": json.loads(user.favorite_shops) if user.favorite_shops and user.favorite_shops.startswith("[") else ([user.favorite_shops] if user.favorite_shops else []),
+                "target_style": getattr(user, 'chu_gu_me', '심플')
+            },
+            "product_context": {
+                "name": product.product_name,
+                "brand": product.brand if hasattr(product, 'brand') else product.platform,
+                "mall": product.platform,
+                "price": product.price,
+                "category": product.category
+            },
+            "mode_block": { "current_mode": mode },
+
+            "impulse_block": {
+                "impulse_score": record.risk_score_1,
+                "impulse_reason_top2": [
+                    {
+                        "feature_key": cause["feature_key"],
+                        "value": details.get('feature_values', {}).get(cause["feature_key"]),
+                        "weight": round(cause["score_contribution"] / max(1, record.risk_score_1), 2),
+                        "guide": guide_info["features"].get(
+                                f"review_count_{persona_suffix}" if cause["feature_key"] == "review_count" else cause["feature_key"],
+                                "이 부분 주의깊게 봐!"
+                            )
+                    } for cause in details.get('top_2_causes', [])
+                ]
+            },
+            
+            "preference_block": {
+                "total_score": record.preference_score,
+                "mixing": { "preference_priority": DEFAULT_VALUES["preference_priority"] },
+                "prior_score": details.get('prior_score', 0),
+                "prior_reason_top2": [
+                    {
+                        "feature_key": r[0],
+                        "value": details.get('feature_values', {}).get(r[0]),
+                        "guide": PRIOR_TEXT.get(
+                            f"{persona_prefix}review_count" if r[0] == "review_count" else r[0],
+                            f"너랑 비슷한 유형은 '{FEATURE_KO.get(r[0], r[0])}' 조건이 만족스러우면 고민이 줄어드는 편이야."
+                        )
+                    } for r in details.get('prior_reasons', [])
+                ],
+                "personal_score": details.get('personal_score', 0),
+                "personal_reason_top2": [
+                    {
+                        "feature_key": r[0],
+                        "value": details.get('feature_values', {}).get(r[0]),
+                        "guide": personal_text_dict.get(
+                            f"{persona_prefix}{r[0]}" if r[0] in ["review_count", "product_likes"] else r[0],
+                            f"이 옷의 '{FEATURE_KO.get(r[0], r[0])}' 조건은 네 평소 스타일이랑 조금 다를 수 있어."
+                        )
+                    } for r in details.get('personal_reasons', [])
+                ]
+            },
+            
+            "conversation_block": {
+                "cart_duration": SURVEY_TEXT_MAPPING["q1"].get(user_answers.get('q1'), "방금 전"),
+                "contact_reason": SURVEY_TEXT_MAPPING["q2"].get(user_answers.get('q2'), "궁금해서"),
+                "purchase_certainty": SURVEY_TEXT_MAPPING["q3"].get(user_answers.get('q3'), "확신 없음"),
+                "key_appeal": SURVEY_TEXT_MAPPING["qc"].get(user_answers.get('qc'), "디자인")
+            },
+            
+            "strategy_matrix": {
+                "level": level_num,
+                "label": guide_info["label"],
+                "goal": guide_info["goal"],
+                "strategy": guide_info["strategy"]
+            }
         }
-    }
+
+        # 🚩 [NEW] 완전체 JSON을 Redis에 1시간 동안 저장
+        redis_client.setex(cache_key_json, 3600, json.dumps(final_input_json, ensure_ascii=False))
+        
+        # 🚩 [NEW] 완전체 JSON을 DB 레코드에도 저장 (영구 백업)
+        record.prompt_data = json.dumps(final_input_json, ensure_ascii=False)
+        db.commit()
+
+    # 📝 [로그] 생성/불러온 JSON 터미널에서 확인하기
+    print("\n" + "="*50)
+    print(f"🚀 LLM INPUT JSON (Trace: {final_input_json['meta']['trace_id']})")
+    print("-"*50)
+    print(json.dumps(final_input_json, indent=4, ensure_ascii=False)) # indent=4로 예쁘게 정렬!
+    print("="*50 + "\n")
 
     # 4. 이제 이 JSON을 빌더에게 던짐!
     builder = TobabaPromptBuilder(final_input_json, current_step=1, user_input=user_input, history=history)
