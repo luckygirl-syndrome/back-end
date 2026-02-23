@@ -23,7 +23,7 @@ jobs:
             cd /home/ubuntu/Back-end
             
             echo "📦 최신 코드 가져오는 중..."
-            git pull origin/main
+            git pull origin main
             
             echo "🏗️ 도커 컨테이너 빌드 및 재실행 중..."
             # app뿐만 아니라 연관된 서비스들도 함께 빌드하도록 수정
