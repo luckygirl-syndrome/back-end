@@ -130,26 +130,41 @@ def parse_and_save_product(db: Session, url: str, user: User, user_product_id: i
         # 4. 유저-상품 매핑 갱신 (또는 저장)
         if user_product_id:
             user_prod = db.query(UserProduct).filter(UserProduct.user_product_id == user_product_id).first()
+            
             if user_prod:
+                # 기존 데이터 업데이트
                 user_prod.product_id = product.product_id
                 user_prod.risk_score_1 = impulse_score
                 user_prod.preference_score = total_pref_score
-                user_prod.status = "IN_PROGRESS"
+                user_prod.status = "PENDING"  # ✅ IN_PROGRESS -> PENDING으로 변경
+                user_prod.is_purchased = 0    # ✅ 확실하게 0으로 세팅 (NULL 방지)
                 db.commit()
             else:
+                # ID는 있는데 데이터가 없는 경우 (예외 케이스) 신규 생성
                 user_prod = UserProduct(
-                    user_id=user.user_id, product_id=product.product_id,
-                    user_type=user_persona_code, risk_score_1=impulse_score,
-                    status="IN_PROGRESS", preference_score=total_pref_score
+                    user_id=user.user_id, 
+                    product_id=product.product_id,
+                    user_type=user_persona_code, 
+                    risk_score_1=impulse_score,
+                    status="PENDING",         # ✅ PENDING
+                    preference_score=total_pref_score,
+                    is_purchased=0            # ✅ 0 추가
                 )
-                db.add(user_prod); db.commit()
+                db.add(user_prod)
+                db.commit()
         else:
+            # 신규 생성
             user_prod = UserProduct(
-                user_id=user.user_id, product_id=product.product_id,
-                user_type=user_persona_code, risk_score_1=impulse_score,
-                status="IN_PROGRESS", preference_score=total_pref_score
+                user_id=user.user_id, 
+                product_id=product.product_id,
+                user_type=user_persona_code, 
+                risk_score_1=impulse_score,
+                status="PENDING",             # ✅ PENDING
+                preference_score=total_pref_score,
+                is_purchased=0                # ✅ 0 추가
             )
-            db.add(user_prod); db.commit()
+            db.add(user_prod)
+            db.commit()
 
         # 🔥 [핵심 추가] 실제 수치 데이터들 모으기 (value: null 방지용)
         # result 딕셔너리에 들어있는 실제 값들을 feature_key 이름에 맞춰 정리해
