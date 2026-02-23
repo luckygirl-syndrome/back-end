@@ -234,7 +234,7 @@ def print_analysis_report(user_id, persona, p_name, pref, risk, prompt_data):
     print(prompt_json)
     
     print("-" * 80)
-    print(f" ✅ 분석 및 프롬프트 준비 완료 (Timestamp: {datetime.datetime.now().strftime('%H:%M:%S')})")
+    print(f" ✅ 분석 및 프롬프트 준비 완료 (Timestamp: {datetime.now().strftime('%H:%M:%S')})")
     print("="*80 + "\n")
 
 async def get_chat_response(db: Session, user_id: int, user_product_id: int, user_answers: dict, user_input: str, history: list = []):
@@ -309,8 +309,8 @@ async def get_chat_response(db: Session, user_id: int, user_product_id: int, use
 
         final_input_json = {
             "meta": {
-                "trace_id": str(re.sub(r'[^a-zA-Z0-9]', '', str(datetime.datetime.now().timestamp()))),
-                "timestamp": datetime.datetime.now().isoformat()
+                "trace_id": str(re.sub(r'[^a-zA-Z0-9]', '', str(datetime.now().timestamp()))),
+                "timestamp": datetime.now().isoformat()
             },
             "user_context": {
                 "persona_type": record.user_type,
