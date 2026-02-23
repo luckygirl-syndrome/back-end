@@ -119,23 +119,28 @@ class MusinsaPerfectScraper:
                     self.result['category'] = " > ".join([c.text.strip() for c in cats])
             except: pass
 
-            # 🚩 [리뷰 Summary 영역 핀포인트 추출]
+            # 🚩 [리뷰 Summary 영역 수정 버전]
             try:
-                # 'ReviewSummary'라는 글자가 포함된 div를 먼저 찾고, 그 안의 span들을 다 가져와
                 review_area = self.driver.find_element(By.CSS_SELECTOR, "div[class*='ReviewSummary']")
                 spans = review_area.find_elements(By.TAG_NAME, "span")
                 
                 for s in spans:
                     text = s.text.strip()
-                    # 1. '4.8' 같은 소수점 숫자가 보이면 점수로 저장
-                    if re.match(r'^\d\.\d$', text):
+        
+                    # 1. '4.8' 또는 '5' 같은 숫자가 보이면 점수로 저장
+                    # 정수(5) 혹은 소수점 한 자리(4.8) 모두 매칭 가능하도록 수정
+                    if re.match(r'^\d(\.\d)?$', text):
                         self.result['review_score'] = text
+            
                     # 2. '후기'라는 글자가 보이면 숫자만 발라내서 개수로 저장
                     elif '후기' in text:
-                        self.result['review_count'] = re.sub(r'[^0-9]', '', text)
-                
-                print(f"✅ 리뷰 데이터 확인: 점수({self.result['review_score']}), 개수({self.result['review_count']})")
-            except: pass
+                        # 후기 (1,234) 같은 경우를 대비해 쉼표(,)도 제거하는 게 안전해!
+                        clean_count = re.sub(r'[^0-9]', '', text)
+                        self.result['review_count'] = clean_count
+            
+                print(f"✅ 리뷰 데이터 확인: 점수({self.result.get('review_score', '0')}), 개수({self.result.get('review_count', '0')})")
+            except Exception as e:
+                print(f"❌ 리뷰 영역 크롤링 중 오류: {e}")
 
             return self.result
 

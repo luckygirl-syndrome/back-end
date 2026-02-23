@@ -204,13 +204,12 @@ def print_analysis_report(user_id, persona, p_name, pref, risk, prompt_data):
     print("="*80 + "\n")
 
 async def get_chat_response(db: Session, user_id: int, product_id: int, user_answers: dict, user_input: str, history: list = []):
-   # 1. DB 레코드 조회
+    # 1. DB 레코드 조회
     record = db.query(UserProduct).filter(
         UserProduct.user_id == user_id,
         UserProduct.product_id == product_id
     ).order_by(UserProduct.created_at.desc()).first()
 
-    # 🚩 '...'을 실제 조건으로 교체!
     product = db.query(Product).filter(Product.product_id == product_id).first()
     user = db.query(User).filter(User.user_id == user_id).first()
 
@@ -220,125 +219,144 @@ async def get_chat_response(db: Session, user_id: int, product_id: int, user_ans
     if not record:
         return "분석 기록이 없네! 다시 URL을 넣어줄래? 🧐"
 
-    # 🚩 [핵심: 레디스에서 상세 데이터 꺼내기]
-    cache_key = f"analysis:{user_id}:{product_id}"
-    cached_raw = redis_client.get(cache_key)
+    # 🚩 [NEW] 캐시 키 설정 및 완성된 JSON 캐시 확인
+    cache_key_json = f"prompt_json:{user_id}:{product_id}"
+    cached_json = redis_client.get(cache_key_json)
     
-    if not cached_raw:
-        # 캐시가 없으면(만료됐으면) 최소한의 기본값이라도 세팅해
-        print(f"⚠️ 캐시 만료됨: {cache_key}")
-        details = {
-            "top_2_causes": [], 
-            "prior_reasons": [], 
-            "personal_reasons": [],
-            "prior_score": 0,
-            "personal_score": 0
-        }
-    else:
-        details = json.loads(cached_raw)
+    final_input_json = None
+    if cached_json:
+        final_input_json = json.loads(cached_json)
+        print(f"✅ 레디스에서 완성된 JSON을 불러왔어! (Key: {cache_key_json})")
+    elif record.prompt_data:
+        final_input_json = json.loads(record.prompt_data)
+        # Redis에도 올려두기
+        redis_client.setex(cache_key_json, 3600, json.dumps(final_input_json, ensure_ascii=False))
+        print(f"✅ DB에서 완성된 JSON을 불러와 레디스에 올렸어! (Key: {cache_key_json})")
 
-    # 2. 모드 결정 및 가이드 데이터 추출
-    mode = determine_mode([
-        {"q_id": 1, "answer_id": user_answers.get('q1')},
-        {"q_id": 2, "answer_id": user_answers.get('q2')},
-        {"q_id": 3, "answer_id": user_answers.get('q3')}
-    ])
-    
-    # 충동 지수 레벨 계산 (임시로 기존 b_score 로직 유지 혹은 record 활용)
-    # 기존 b_score 로직을 constants의 스코어 테이블 기반으로 재산출
-    b_score = SURVEY_SCORE_TABLE["q1"].get(user_answers.get('q1'), (0,0))[0] + \
-              SURVEY_SCORE_TABLE["q2"].get(user_answers.get('q2'), (0,0))[0] + \
-              SURVEY_SCORE_TABLE["q3"].get(user_answers.get('q3'), (0,0))[0]
-    
-    level_num = min(5, max(1, b_score))
-    level_key = f"Level {level_num}"
-    guide_info = IMPULSE_GUIDE_DATA.get(level_key)
+    # 아직 캐싱된 게 없다면 (첫 호출), 처음 조립을 시작함
+    if not final_input_json:
+        # 🚩 [기존 로직] 레디스에서 부분 상세 데이터 꺼내기
+        cache_key = f"analysis:{user_id}:{product_id}"
+        cached_raw = redis_client.get(cache_key)
+        
+        if not cached_raw:
+            print(f"⚠️ 기존 상세 캐시 만료됨: {cache_key}")
+            details = {
+                "top_2_causes": [], 
+                "prior_reasons": [], 
+                "personal_reasons": [],
+                "prior_score": 0,
+                "personal_score": 0,
+                "feature_values": {}
+            }
+        else:
+            details = json.loads(cached_raw)
 
-    # 4. [선호도 블록] 맞춤 텍스트 매핑 로직
-    persona_suffix = record.user_type[-1].lower() # 't' or 'm'
-    persona_prefix = "default_" if persona_suffix == 't' else "myway_"
-    
-    # Personal 텍스트 사전 선택
-    p_type = details.get('personal_reason_type', 'positive')
-    personal_text_dict = PERSONAL_RISK_TEXT if p_type == 'risk' else PERSONAL_POS_TEXT
+        # 2. 모드 결정 및 가이드 데이터 추출
+        mode = determine_mode([
+            {"q_id": 1, "answer_id": user_answers.get('q1')},
+            {"q_id": 2, "answer_id": user_answers.get('q2')},
+            {"q_id": 3, "answer_id": user_answers.get('q3')}
+        ])
+        
+        b_score = SURVEY_SCORE_TABLE["q1"].get(user_answers.get('q1'), (0,0))[0] + \
+                  SURVEY_SCORE_TABLE["q2"].get(user_answers.get('q2'), (0,0))[0] + \
+                  SURVEY_SCORE_TABLE["q3"].get(user_answers.get('q3'), (0,0))[0]
+        
+        level_num = min(5, max(1, b_score))
+        level_key = f"Level {level_num}"
+        guide_info = IMPULSE_GUIDE_DATA.get(level_key)
 
-    final_input_json = {
-        "meta": {
-            "trace_id": str(re.sub(r'[^a-zA-Z0-9]', '', str(datetime.datetime.now().timestamp()))),
-            "timestamp": datetime.datetime.now().isoformat()
-        },
-        "user_context": {
-            "persona_type": record.user_type,
-            "frequent_malls": json.loads(user.favorite_shops) if user.favorite_shops and user.favorite_shops.startswith("[") else ([user.favorite_shops] if user.favorite_shops else []),
-            "target_style": getattr(user, 'chu_gu_me', '심플')
-        },
-        "product_context": {
-            "name": product.product_name,
-            "brand": product.brand if hasattr(product, 'brand') else product.platform,
-            "mall": product.platform,
-            "price": product.price,
-            "category": product.category
-        },
-        "mode_block": { "current_mode": mode },
+        persona_suffix = record.user_type[-1].lower()
+        persona_prefix = "default_" if persona_suffix == 't' else "myway_"
+        
+        p_type = details.get('personal_reason_type', 'positive')
+        personal_text_dict = PERSONAL_RISK_TEXT if p_type == 'risk' else PERSONAL_POS_TEXT
 
-        "impulse_block": {
-            "impulse_score": record.risk_score_1,
-            "impulse_reason_top2": [
-                {
-                    "feature_key": cause["feature_key"],
-                    "value": details.get('feature_values', {}).get(cause["feature_key"]), # 👈 value 추가!
-                    "weight": round(cause["score_contribution"] / max(1, record.risk_score_1), 2),
-                    "guide": guide_info["features"].get(
-                            f"review_count_{persona_suffix}" if cause["feature_key"] == "review_count" else cause["feature_key"],
-                            "이 부분 주의깊게 봐!"
+        final_input_json = {
+            "meta": {
+                "trace_id": str(re.sub(r'[^a-zA-Z0-9]', '', str(datetime.datetime.now().timestamp()))),
+                "timestamp": datetime.datetime.now().isoformat()
+            },
+            "user_context": {
+                "persona_type": record.user_type,
+                "frequent_malls": json.loads(user.favorite_shops) if user.favorite_shops and user.favorite_shops.startswith("[") else ([user.favorite_shops] if user.favorite_shops else []),
+                "target_style": getattr(user, 'chu_gu_me', '심플')
+            },
+            "product_context": {
+                "name": product.product_name,
+                "brand": product.brand if hasattr(product, 'brand') else product.platform,
+                "mall": product.platform,
+                "price": product.price,
+                "category": product.category
+            },
+            "mode_block": { "current_mode": mode },
+
+            "impulse_block": {
+                "impulse_score": record.risk_score_1,
+                "impulse_reason_top2": [
+                    {
+                        "feature_key": cause["feature_key"],
+                        "value": details.get('feature_values', {}).get(cause["feature_key"]),
+                        "weight": round(cause["score_contribution"] / max(1, record.risk_score_1), 2),
+                        "guide": guide_info["features"].get(
+                                f"review_count_{persona_suffix}" if cause["feature_key"] == "review_count" else cause["feature_key"],
+                                "이 부분 주의깊게 봐!"
+                            )
+                    } for cause in details.get('top_2_causes', [])
+                ]
+            },
+            
+            "preference_block": {
+                "total_score": record.preference_score,
+                "mixing": { "preference_priority": DEFAULT_VALUES["preference_priority"] },
+                "prior_score": details.get('prior_score', 0),
+                "prior_reason_top2": [
+                    {
+                        "feature_key": r[0],
+                        "value": details.get('feature_values', {}).get(r[0]),
+                        "guide": PRIOR_TEXT.get(
+                            f"{persona_prefix}review_count" if r[0] == "review_count" else r[0],
+                            f"너랑 비슷한 유형은 '{FEATURE_KO.get(r[0], r[0])}' 조건이 만족스러우면 고민이 줄어드는 편이야."
                         )
-                } for cause in details.get('top_2_causes', [])
-            ]
-        },
-        
-        "preference_block": {
-            "total_score": record.preference_score,
-            "mixing": { "preference_priority": DEFAULT_VALUES["preference_priority"] },
-            "prior_score": details.get('prior_score', 0),
-            "prior_reason_top2": [
-                {
-                    "feature_key": r[0],
-                    "value": details.get('feature_values', {}).get(r[0]), # 👈 실제 수치(ex: 4.7, 30) 추가!
-                    "guide": PRIOR_TEXT.get(
-                        f"{persona_prefix}review_count" if r[0] == "review_count" else r[0],
-                        f"너랑 비슷한 유형은 '{FEATURE_KO.get(r[0], r[0])}' 조건이 만족스러우면 고민이 줄어드는 편이야."
-                    )
-                } for r in details.get('prior_reasons', [])
-            ],
-            "personal_score": details.get('personal_score', 0),
-            "personal_reason_top2": [
-                {
-                    "feature_key": r[0],
-                    "value": details.get('feature_values', {}).get(r[0]), # 👈 실제 수치 추가!
-                    "guide": personal_text_dict.get(
-                        f"{persona_prefix}{r[0]}" if r[0] in ["review_count", "product_likes"] else r[0],
-                        f"이 옷의 '{FEATURE_KO.get(r[0], r[0])}' 조건은 네 평소 스타일이랑 조금 다를 수 있어."
-                    )
-                } for r in details.get('personal_reasons', [])
-            ]
-        },
-        
-        "conversation_block": {
-            "cart_duration": SURVEY_TEXT_MAPPING["q1"].get(user_answers.get('q1'), "방금 전"),
-            "contact_reason": SURVEY_TEXT_MAPPING["q2"].get(user_answers.get('q2'), "궁금해서"),
-            "purchase_certainty": SURVEY_TEXT_MAPPING["q3"].get(user_answers.get('q3'), "확신 없음"),
-            "key_appeal": SURVEY_TEXT_MAPPING["qc"].get(user_answers.get('qc'), "디자인")
-        },
-        
-        "strategy_matrix": {
-            "level": level_num,
-            "label": guide_info["label"],
-            "goal": guide_info["goal"],
-            "strategy": guide_info["strategy"]
+                    } for r in details.get('prior_reasons', [])
+                ],
+                "personal_score": details.get('personal_score', 0),
+                "personal_reason_top2": [
+                    {
+                        "feature_key": r[0],
+                        "value": details.get('feature_values', {}).get(r[0]),
+                        "guide": personal_text_dict.get(
+                            f"{persona_prefix}{r[0]}" if r[0] in ["review_count", "product_likes"] else r[0],
+                            f"이 옷의 '{FEATURE_KO.get(r[0], r[0])}' 조건은 네 평소 스타일이랑 조금 다를 수 있어."
+                        )
+                    } for r in details.get('personal_reasons', [])
+                ]
+            },
+            
+            "conversation_block": {
+                "cart_duration": SURVEY_TEXT_MAPPING["q1"].get(user_answers.get('q1'), "방금 전"),
+                "contact_reason": SURVEY_TEXT_MAPPING["q2"].get(user_answers.get('q2'), "궁금해서"),
+                "purchase_certainty": SURVEY_TEXT_MAPPING["q3"].get(user_answers.get('q3'), "확신 없음"),
+                "key_appeal": SURVEY_TEXT_MAPPING["qc"].get(user_answers.get('qc'), "디자인")
+            },
+            
+            "strategy_matrix": {
+                "level": level_num,
+                "label": guide_info["label"],
+                "goal": guide_info["goal"],
+                "strategy": guide_info["strategy"]
+            }
         }
-    }
 
-    # 📝 [로그] 생성된 JSON 터미널에서 확인하기
+        # 🚩 [NEW] 완전체 JSON을 Redis에 1시간 동안 저장
+        redis_client.setex(cache_key_json, 3600, json.dumps(final_input_json, ensure_ascii=False))
+        
+        # 🚩 [NEW] 완전체 JSON을 DB 레코드에도 저장 (영구 백업)
+        record.prompt_data = json.dumps(final_input_json, ensure_ascii=False)
+        db.commit()
+
+    # 📝 [로그] 생성/불러온 JSON 터미널에서 확인하기
     print("\n" + "="*50)
     print(f"🚀 LLM INPUT JSON (Trace: {final_input_json['meta']['trace_id']})")
     print("-"*50)
