@@ -3,7 +3,7 @@ from app.core.database import Base
 from datetime import datetime  # <--- 이 줄을 꼭 추가해줘!
 
 class Chat(Base):
-    __tablename__ = "chat"
+    __tablename__ = "chat_log"
 
     chat_id = Column(BIGINT, primary_key=True, autoincrement=True)
     user_id = Column(BIGINT, nullable=False)

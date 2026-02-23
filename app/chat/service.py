@@ -9,6 +9,19 @@ import google.generativeai as genai
 from sqlalchemy.orm import Session
 from app.chat.enum import ChatStatus
 
+def get_status_label(status: str, is_purchased: int) -> str:
+    """ChatStatus에 따른 한글 라벨을 반환하는 공통 함수"""
+    if is_purchased == 1:
+        return "구매 완료"
+    
+    status_display_map = {
+        ChatStatus.ANALYZING: "고민 중",
+        ChatStatus.PENDING: "고민 중",
+        ChatStatus.FINISHED: "고민 중",
+        ChatStatus.PURCHASED: "구매 완료",
+        ChatStatus.ABANDONED: "구매 포기"
+    }
+    return status_display_map.get(status, "고민 중")
 from app.chat.models import Chat
 from app.chat.schemas import ChatListItem   
 from app.users.models import User
@@ -109,24 +122,22 @@ def parse_and_save_product(db: Session, url: str, user: User, user_product_id: i
         impulse_score = int(risk_res.get('total_score', 0))
         total_pref_score = int(pref_out['total_score'])
 
-        # 3. DB 저장 (상품 확인 및 생성)
-        product = db.query(Product).filter(Product.product_name == result['product_name']).first()
-        if not product:
-            product = Product(
-                product_img=result.get('product_img', ''),
-                product_name=result.get('product_name', 'Unknown'),
-                platform=result.get('platform', 'Unknown'),
-                category=result.get('category', '기타'),
-                free_shipping=bool(result.get('free_shipping', 0)),
-                price=int(result.get('discounted_price', 0)),
-                discount_rate=float(result.get('discount_rate', 0)),
-                is_direct_shipping=bool(result.get('is_direct_shipping', 0)),
-                review_count=int(result.get('review_count', 0)),
-                review_score=float(result.get('review_score', 0.0)),
-                product_likes=str(result.get('product_likes', '0')),
-                **{col: result.get(col, 0) for col in ["sim_temptation", "sim_trend_hype", "sim_fit_anxiety", "sim_quality_logic", "sim_bundle", "sim_confidence"]}
-            )
-            db.add(product); db.flush()
+        # 3. DB 저장 (무조건 신규 생성 - 유저 요청마다 독립적 product_id 부여)
+        product = Product(
+            product_img=result.get('product_img', ''),
+            product_name=result.get('product_name', 'Unknown'),
+            platform=result.get('platform', 'Unknown'),
+            category=result.get('category', '기타'),
+            free_shipping=bool(result.get('free_shipping', 0)),
+            price=int(result.get('discounted_price', 0)),
+            discount_rate=float(result.get('discount_rate', 0)),
+            is_direct_shipping=bool(result.get('is_direct_shipping', 0)),
+            review_count=int(result.get('review_count', 0)),
+            review_score=float(result.get('review_score', 0.0)),
+            product_likes=str(result.get('product_likes', '0')),
+            **{col: result.get(col, 0) for col in ["sim_temptation", "sim_trend_hype", "sim_fit_anxiety", "sim_quality_logic", "sim_bundle", "sim_confidence"]}
+        )
+        db.add(product); db.flush()
 
         # 4. 유저-상품 매핑 갱신 (또는 저장)
         if user_product_id:
@@ -516,33 +527,15 @@ def get_user_chat_list(db: Session, user_id: int):
     if not results:
         return {"latest_chat": None, "all_chats": []}
 
-    # 2. 화면에 보여줄 한글 라벨 매핑 (Enum 기반)
-    # 이 딕셔너리만 수정하면 화면에 나가는 글자를 한 번에 바꿀 수 있어!
-    status_display_map = {
-        ChatStatus.ANALYZING: "고민 중",
-        ChatStatus.PENDING: "고민 중",
-        ChatStatus.FINISHED: "고민 중",
-        ChatStatus.PURCHASED: "구매 완료",
-        ChatStatus.ABANDONED: "구매 포기"
-    }
-
     chat_items = []
     for user_prod, prod in results:
-        # 🚩 우선순위 로직: 구매 여부(is_purchased)를 먼저 체크하고, 
-        # 그게 아니면 status 컬럼의 코드를 매핑해.
-        if user_prod.is_purchased == 1:
-            current_status_label = "구매 완료"
-        else:
-            # DB의 status 값을 가져오되, 없으면 기본값으로 '고민 중'
-            current_status_label = status_display_map.get(user_prod.status, "고민 중")
-
         item = ChatListItem(
             user_product_id=user_prod.user_product_id,
             product_name=prod.product_name,
             product_img=prod.product_img,
             price=prod.price,
             last_chat_time=get_time_display(user_prod.updated_at),
-            status_label=current_status_label,
+            status_label=get_status_label(user_prod.status, user_prod.is_purchased),
             is_purchased=user_prod.is_purchased
         )
         chat_items.append(item)
@@ -626,26 +619,12 @@ def get_chat_messages(db: Session, user_product_id: int, user_id: int):
         if messages:
             redis_client.expire(cache_key, 3600)
 
-    # 4. 상태 라벨 매핑 (get_user_chat_list 로직 재활용)
-    status_display_map = {
-        ChatStatus.ANALYZING: "고민 중",
-        ChatStatus.PENDING: "고민 중",
-        ChatStatus.FINISHED: "고민 중",
-        ChatStatus.PURCHASED: "구매 완료",
-        ChatStatus.ABANDONED: "구매 포기"
-    }
-    
-    if user_prod.is_purchased == 1:
-        current_status_label = "구매 완료"
-    else:
-        current_status_label = status_display_map.get(user_prod.status, "고민 중")
-
     return {
         "user_product_id": user_prod.user_product_id, 
         "product_name": prod.product_name,
         "product_img": prod.product_img,
         "price": prod.price,
-        "status_label": current_status_label,
+        "status_label": get_status_label(user_prod.status, user_prod.is_purchased),
         "messages": messages
     }
 
@@ -663,4 +642,36 @@ def finish_chat(db: Session, user_product_id: int, user_id: int):
         
     record.status = ChatStatus.FINISHED
     db.commit()
+    return True
+
+def create_initial_user_product(db: Session, user_id: int, user_persona_code: str):
+    """채팅 시작 시 초기 UserProduct 레코드 생성"""
+    user_prod = UserProduct(
+        user_id=user_id,
+        product_id=0,
+        user_type=user_persona_code,
+        status="PENDING"
+    )
+    db.add(user_prod)
+    db.commit()
+    db.refresh(user_prod)
+    return user_prod
+
+def finalize_chat_survey(db: Session, user_id: int, user_product_id: int, user_answers: dict, first_response: str):
+    """설문 완료 시 질문/답변 및 AI 첫 응답 저장"""
+    # 1. 설문 질문과 답변 저장
+    survey_pairs = [
+        ("이거 장바구니/찜에 담은 지 얼마나 됐어?", get_q1_text(user_answers.get('q1'))),
+        ("나한테 왜 연락한 거야?", get_q2_text(user_answers.get('q2'))),
+        ("이 옷, 이미 거의 사기로 마음 정한 상태야? 아니면 아직 확신이 부족해?", get_q3_text(user_answers.get('q3'))),
+        ("이 옷의 어떤 점이 네 마음을 뺏었어?", get_qc_text(user_answers.get('qc')))
+    ]
+
+    for question, answer in survey_pairs:
+        save_chat_message(db, user_id, user_product_id, "assistant", question)
+        save_chat_message(db, user_id, user_product_id, "user", answer)
+
+    # 2. AI의 첫 분석 답변 저장
+    save_chat_message(db, user_id, user_product_id, "assistant", first_response)
+    
     return True

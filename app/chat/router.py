@@ -33,16 +33,8 @@ async def start_chat(
     # 1. 페르소나 정리
     user_persona_code = service.clean_persona_code(current_user)
 
-    # 2. 임시 UserProduct 레코드 먼저 생성 (product_id는 0으로 둠)
-    user_prod = UserProduct(
-        user_id=current_user.user_id,
-        product_id=0,
-        user_type=user_persona_code,
-        status="PENDING"
-    )
-    db.add(user_prod)
-    db.commit()
-    db.refresh(user_prod)
+    # 2. 임시 UserProduct 레코드 생성 (비즈니스 로직은 서비스로 이동)
+    user_prod = service.create_initial_user_product(db, current_user.user_id, user_persona_code)
 
     # 3. 백그라운드 태스크에 user_product_id 전달
     background_tasks.add_task(
@@ -50,7 +42,7 @@ async def start_chat(
         db, 
         product_url, 
         current_user,
-        user_prod.user_product_id  # ✅ 새로 추가됨
+        user_prod.user_product_id
     )
 
     # 4. 유저에게는 user_product_id와 설문지 전달
@@ -68,7 +60,7 @@ async def start_chat(
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.chat.schemas import SurveyRequest  # 아까 만든 Pydantic 모델
+from app.chat.schemas import SurveyRequest 
 from app.chat import service
 
 @router.post(
@@ -82,7 +74,7 @@ from app.chat import service
 )
 async def finalize_survey(
     user_product_id: int,
-    request: SurveyRequest,  # ✅ 이제 additionalProp1 대신 q1, q2.. 딱 뜸!
+    request: SurveyRequest, 
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -90,65 +82,32 @@ async def finalize_survey(
     # 1. Pydantic 모델을 dict로 변환 (q1, q2, q3, qc 포함)
     user_answers = request.model_dump()
 
-   # 2. 이 유저가 요청한 특정 상품 분석 기록 찾기
-    last_request = db.query(UserProduct).filter(
+    # 2. 이 유저가 요청한 특정 상품 분석 기록 찾기
+    user_prod = db.query(UserProduct).filter(
         UserProduct.user_product_id == user_product_id,
         UserProduct.user_id == current_user.user_id
     ).first()
 
-    if not last_request:
+    if not user_prod:
         raise HTTPException(status_code=404, detail="요청한 상품 기록이 없어요!")
 
-    # 만약 '분석 완료'를 나타내는 별도의 필드(예: is_analyzed)가 있다면 여기서 체크
-    # if not last_request.is_analyzed:
-    #     raise HTTPException(status_code=202, detail="아직 데이터 분석 중이에요!")
-
-    print(f"🚀 DEBUG: 불러온 상품 ID -> {last_request.product_id}")
-    
     user_input = "설문 완료!"
     # 3. 챗봇 답변 생성 시작
-    # 서비스 레이어에서 이제 언니가 원했던 그 '최종 JSON' 형식을 만들어서 Gemini를 호출함
     first_response = await service.get_chat_response(
         db=db, 
         user_id=current_user.user_id, 
         user_product_id=user_product_id, 
         user_answers=user_answers, 
-        user_input=user_input # 첫 진입이므로 고정 메시지 전달
+        user_input=user_input
     )
 
-    # 4. ✅ 유저의 설문 질문과 답변을 쌍으로 묶어서 사용자/AI 메시지로 저장
-    survey_pairs = [
-        ("이거 장바구니/찜에 담은 지 얼마나 됐어?", service.get_q1_text(user_answers.get('q1'))),
-        ("나한테 왜 연락한 거야?", service.get_q2_text(user_answers.get('q2'))),
-        ("이 옷, 이미 거의 사기로 마음 정한 상태야? 아니면 아직 확신이 부족해?", service.get_q3_text(user_answers.get('q3'))),
-        ("이 옷의 어떤 점이 네 마음을 뺏었어?", service.get_qc_text(user_answers.get('qc')))
-    ]
-
-    for question, answer in survey_pairs:
-        # 질문 저장 (assistant)
-        service.save_chat_message(
-            db=db,
-            user_id=current_user.user_id,
-            user_product_id=user_product_id,
-            role="assistant",
-            content=question
-        )
-        # 답변 저장 (user)
-        service.save_chat_message(
-            db=db,
-            user_id=current_user.user_id,
-            user_product_id=user_product_id,
-            role="user",
-            content=answer
-        )
-
-    # 5. ✅ AI의 첫 분석 답변 저장
-    service.save_chat_message(
+    # 4. 설문 내역 및 AI 첫 응답 저장 (비즈니스 로직은 서비스로 이동)
+    service.finalize_chat_survey(
         db=db,
         user_id=current_user.user_id,
         user_product_id=user_product_id,
-        role="assistant",
-        content=first_response
+        user_answers=user_answers,
+        first_response=first_response
     )
     
     return {"reply": first_response}
@@ -156,10 +115,9 @@ async def finalize_survey(
 @router.get(
     "/list", 
     response_model=ChatListResponse,
-    summary="유저의 채팅 목록 조회 (상품별 중복 제거)",
+    summary="유저의 채팅 목록 조회",
     description="""
     현재 유저가 대화 중인 모든 채팅방 목록을 반환합니다.
-    동일한 상품을 여러 번 분석한 경우, 가장 최근에 생성된 채팅방 하나만 리스트에 포함됩니다.
     최신 대화순으로 정렬되어 제공됩니다.
     """
 )
