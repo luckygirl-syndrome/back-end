@@ -7,7 +7,7 @@ import joblib
 from datetime import datetime
 import google.generativeai as genai
 from sqlalchemy.orm import Session
-from chat.enum import ChatStatus
+from app.chat.enum import ChatStatus
 
 from app.chat.models import ChatListItem
 from app.users.models import User
