@@ -42,7 +42,7 @@ COUNT_LOG_COLS = ["product_likes"]   # review_count는 utility로 쓸 거라 log
 PERSONAL_SCALE_COLS = ["discount_rate","review_score","review_count","product_likes","is_direct_shipping"]
 
 # total mix
-N0_ALPHA = 20  # alpha(n)=N0/(N0+n)
+N0_ALPHA = 5   # alpha(n)=N0/(N0+n). 줄여서 테스트 때 더 빨리 반영되게 함.
 
 # =========================
 # Utils
