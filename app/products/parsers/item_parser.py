@@ -4,6 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from bs4 import BeautifulSoup
+import logging
+
+# 🚩 [추가] selenium-wire의 시끄러운 네트워크 로그(INFO)를 차단함
+logging.getLogger('seleniumwire').setLevel(logging.WARNING)
+# hpack 등의 하위 라이브러리 로그도 조용히 시킴
+logging.getLogger('hpack').setLevel(logging.WARNING)
 
 # 🚩 [수정] selenium 대신 seleniumwire를 임포트해야 프록시 옵션을 인식해!
 from seleniumwire import webdriver 
@@ -27,6 +33,11 @@ class MusinsaPerfectScraper:
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # 🚩 [추가] 이미지 로딩 차단으로 속도 최적화
+        prefs = {"profile.managed_default_content_settings.images": 2}
+        chrome_options.add_experimental_option("prefs", prefs)
+        
         self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
     def run(self, url):
@@ -48,7 +59,7 @@ class MusinsaPerfectScraper:
 
             # 🚩 [리뷰 탈출 필살기] 화면을 중간까지 슥- 내려서 리뷰 로딩시키기
             self.driver.execute_script("window.scrollTo(0, 1500);") 
-            time.sleep(1.5) # 리뷰 데이터가 서버에서 올 시간 확보
+            time.sleep(0.5) # 1.5 -> 0.5로 단축
             
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
   
@@ -161,7 +172,13 @@ class ZigzagDetailCrawler:
         self.chrome_options.add_argument('--headless')
         self.chrome_options.add_argument('--no-sandbox')
         self.chrome_options.add_argument('--disable-dev-shm-usage')
+        self.chrome_options.add_argument('--disable-gpu')
         self.chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        
+        # 🚩 [추가] 이미지 로딩 차단
+        prefs = {"profile.managed_default_content_settings.images": 2}
+        self.chrome_options.add_experimental_option("prefs", prefs)
+        
         self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
 
     def _expand_product_info(self):
@@ -170,7 +187,7 @@ class ZigzagDetailCrawler:
                 EC.presence_of_element_located((By.XPATH, "//button[contains(., '상품정보 더 보기')]"))
             )
             self.driver.execute_script("arguments[0].click();", more_button)
-            time.sleep(2)
+            time.sleep(0.5) # 2 -> 0.5로 단축
         except Exception:
             pass
 
@@ -180,7 +197,7 @@ class ZigzagDetailCrawler:
 
     def crawl_detail(self, url):
         self.driver.get(url)
-        time.sleep(3)
+        time.sleep(1) # 3 -> 1로 단축
         self._expand_product_info()
         soup = BeautifulSoup(self.driver.page_source, 'html.parser')
         data = {}
@@ -326,11 +343,11 @@ class AblyDetailCrawler:
             # 🚀 [핵심] 3단계 스크롤 로직 (리뷰/찜수가 로딩될 기회를 줌)
             for offset in [800, 1600]: 
                 self.driver.execute_script(f"window.scrollTo(0, {offset});")
-                time.sleep(1.5) # 각 스크롤 후 로딩 대기
-
+                time.sleep(0.5) # 1.5 -> 0.5로 단축
+            
             # 다시 맨 위로 살짝 올려서 상단 정보도 놓치지 않게 함
             self.driver.execute_script("window.scrollTo(0, 500);")
-            time.sleep(1)
+            time.sleep(0.2) # 1.0 -> 0.2로 단축
 
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
 
