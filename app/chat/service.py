@@ -656,7 +656,10 @@ def save_chat_message(db: Session, user_id: int, user_product_id: int, role: str
     msg_data = {
         "role": role,
         "content": content,
-        "created_at": new_chat.created_at.isoformat()
+        # ChatRoomDetailResponse.ChatMessageResponse 에서 `message` 필드를 요구하므로
+        # 대화 기록에서는 content와 동일하게 채워준다.
+        "message": content,
+        "created_at": new_chat.created_at.isoformat(),
     }
     
     # 리스트 끝에 추가하고, 1시간(3600초) 만료 설정
@@ -686,7 +689,13 @@ def get_chat_messages(db: Session, user_product_id: int, user_id: int):
 
     if cached_msgs:
         print(f"✅ Redis에서 채팅 메시지 {len(cached_msgs)}개를 불러왔어! (Key: {cache_key})")
-        messages = [json.loads(m) for m in cached_msgs]
+        # 과거 캐시 데이터에는 `message` 키가 없을 수 있으므로 content로 채워준다.
+        messages = []
+        for m in cached_msgs:
+            obj = json.loads(m)
+            if "message" not in obj:
+                obj["message"] = obj.get("content", "")
+            messages.append(obj)
     else:
         # 3. Redis에 없으면 DB에서 가져오기
         print(f"⚠️ Redis에 메시지가 없어 DB에서 가져오는 중... (Key: {cache_key})")
@@ -702,7 +711,8 @@ def get_chat_messages(db: Session, user_product_id: int, user_id: int):
             msg_dict = {
                 "role": m.role,
                 "content": m.content,
-                "created_at": m.created_at.isoformat()
+                "message": m.content,
+                "created_at": m.created_at.isoformat(),
             }
             messages.append(msg_dict)
             # 가져온 김에 Redis에도 채워두기
