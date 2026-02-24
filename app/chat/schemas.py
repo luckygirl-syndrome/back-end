@@ -1,4 +1,6 @@
 from pydantic import BaseModel, Field
+from typing import List, Optional
+from datetime import datetime
 
 class SurveyRequest(BaseModel):
     q1: int = Field(..., description="장바구니 기간 (1-5)", example=1)
@@ -6,9 +8,25 @@ class SurveyRequest(BaseModel):
     q3: int = Field(..., description="구매 확신도 (1-4)", example=2)
     qc: int = Field(..., description="핵심 매력 (1-7)", example=6)
 
-from pydantic import BaseModel
-from typing import List, Optional
-from datetime import datetime
+class ChatMessageRequest(BaseModel):
+    message: str = Field(..., description="유저 메시지", example="이거 사고 싶어")
+
+class ChatReply(BaseModel):
+    user_product_id: int
+    reply: str
+    is_exit: Optional[bool] = False
+    decision_code: Optional[str] = None
+
+
+class ChatMessageResponse(BaseModel):
+    # For /messages/ endpoint
+    message: str = Field(..., description="LLM 응답 메시지")
+    
+    # For /room/{id} endpoint (from origin/main)
+    role: Optional[str] = None
+    content: Optional[str] = None
+    created_at: Optional[datetime] = None
+
 
 class ChatListItem(BaseModel):
     user_product_id: int
@@ -19,14 +37,11 @@ class ChatListItem(BaseModel):
     status_label: str    # "구매 완료", "구매 포기", "고민 중"
     is_purchased: Optional[int]
 
+
 class ChatListResponse(BaseModel):
     latest_chat: Optional[ChatListItem]
     all_chats: List[ChatListItem]
 
-class ChatMessageResponse(BaseModel):
-    role: str       # "user" 또는 "assistant"
-    content: str    # 대화 내용
-    created_at: datetime
 
 class ChatRoomDetailResponse(BaseModel):
     user_product_id: int

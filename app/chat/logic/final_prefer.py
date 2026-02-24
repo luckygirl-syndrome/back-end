@@ -8,6 +8,9 @@ Original file is located at
 """
 
 import os, json
+import logging
+from typing import Dict, Any, List, Optional
+logger = logging.getLogger(__name__)
 import numpy as np
 import pandas as pd
 import joblib
@@ -208,8 +211,8 @@ def score_prior(item_json: dict, persona_type: str,
                 # 기여도(feat_contrib)를 그대로 저장 (음수여도 일단 저장)
                 reason_results.append({'name': matched, 'contrib': feat_contrib, 'raw_feat_name': name})
 
-        print(f"✅ [score_prior] Xz.shape={Xz.shape}, EXCLUDE_AT_INFERENCE={EXCLUDE_AT_INFERENCE}")
-        print(f"✅ [score_prior] Extracted Candidates: {reason_results}")
+        logger.debug(f"✅ [score_prior] Xz.shape={Xz.shape}, EXCLUDE_AT_INFERENCE={EXCLUDE_AT_INFERENCE}")
+        logger.debug(f"✅ [score_prior] Extracted Candidates: {reason_results}")
 
         # 🚩 정렬 로직: 기여도가 높은 순서대로 (점수가 낮아도 그중 제일 높은 거 2개)
         reason_results = sorted(reason_results, key=lambda x: x['contrib'], reverse=True)
@@ -231,12 +234,11 @@ def score_prior(item_json: dict, persona_type: str,
                 seen.add(f_name)
             if len(top2_with_data) >= topk: break
 
-        print(f"✅ [score_prior] Final Top2 Results: {top2_with_data}")
+        logger.debug(f"✅ [score_prior] Final Top2 Results: {top2_with_data}")
 
     except Exception as e:
         import traceback
-        print(f"❌ score_prior 에러: {e}")
-        print(traceback.format_exc())
+        logger.error(f"❌ score_prior 에러: {e}\n{traceback.format_exc()}")
 
     return prior_score, top2_with_data
 
