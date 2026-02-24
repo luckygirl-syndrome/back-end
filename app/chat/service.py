@@ -13,6 +13,7 @@ import traceback
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +90,10 @@ def load_user_profile(user: User):
     
     # 1. 아티팩트에서 mean/std Serise 형태로 준비 (final_prefer 가 요구하는 형식)
     import pandas as pd
-    s_mean = pd.Series(scaler_cont.mean_, index=meta["SCALE_COLS"])
-    s_std = pd.Series(np.sqrt(scaler_cont.var_), index=meta["SCALE_COLS"])
+    # index에서 delta_ 접두어를 떼어줌 (final_prefer의 PERSONAL_SCALE_COLS 매칭용)
+    new_index = [c.replace("delta_", "") for c in meta["SCALE_COLS"]]
+    s_mean = pd.Series(scaler_cont.mean_, index=new_index)
+    s_std = pd.Series(np.sqrt(scaler_cont.var_) + 1e-9, index=new_index)
 
     return reconstruct_profile(
         mu_like_str=user.mu_like,
@@ -253,7 +256,12 @@ def parse_and_save_product(db: Session, url: str, user: User, user_product_id: i
             "user_context": {"persona_type": user_persona_code, "target_style": getattr(user, 'chu_gu_me', '심플'), "n_effective": pref_out["n_effective"]},
             "analysis_result": {"total_prefer_score": total_pref_score, "impulse_score": impulse_score, "alpha_value": pref_out["alpha"]},
             "prior_analysis": {"score": pref_out["prior_score"], "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["prior_reason_top2"]]},
-            "personal_analysis": {"score": pref_out["personal_score"], "reason_type": pref_out["personal_reason_type"], "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["personal_reason_top2"]]},
+            "personal_analysis": {
+                "score": pref_out["personal_score"], 
+                "reason_type": pref_out["personal_reason_type"], 
+                "n_effective": pref_out["n_effective"],
+                "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["personal_reason_top2"]]
+            },
             "impulse_block": {"score": impulse_score, "label": risk_res["risk_label"], "level": risk_res["risk_level"], "top_causes": [{"name": c["feature_name"], "value": feature_values.get(c["feature_key"]), "detail": c["detail"]} for c in risk_res["top_2_causes"]]}
         }
         print_analysis_report(user.user_id, user_persona_code, product.product_name, pref_out, risk_res, prompt_data)
