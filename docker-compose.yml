@@ -34,6 +34,8 @@ services:
 
   redis:
     image: redis:7.2-alpine
+    ports:
+    - "6379:6379"
     container_name: ttobaba-redis
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
