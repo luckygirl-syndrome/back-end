@@ -4,17 +4,38 @@ app/chat/service.py
 비즈니스 로직 담당.
 - parse_and_save_product: 상품 파싱 + DB/Redis 저장 (Background Task, 동기)
 - init_chat_session: finalize-survey에서 호출. JSON 조립 → Redis 세션 저장 → 첫 응답 생성
-- handle_message: /{chat_id}/messages/ 에서 호출. 세션 로드 → 프롬프트 조립 → 응답 생성
+- handle_message: /{user_product_id}/messages/ 에서 호출. 세션 로드 → 프롬프트 조립 → 응답 생성
 """
 import os
-import datetime
 import json
 import re
 import traceback
+import logging
+from datetime import datetime
+from typing import Optional, Dict, Any, Tuple
+
+logger = logging.getLogger(__name__)
 
 import joblib
+import google.generativeai as genai
 from sqlalchemy.orm import Session
+from app.chat.enum import ChatStatus
 
+def get_status_label(status: str, is_purchased: int) -> str:
+    """ChatStatus에 따른 한글 라벨을 반환하는 공통 함수"""
+    if is_purchased == 1:
+        return "구매 완료"
+    
+    status_display_map = {
+        ChatStatus.ANALYZING: "고민 중",
+        ChatStatus.PENDING: "고민 중",
+        ChatStatus.FINISHED: "고민 중",
+        ChatStatus.PURCHASED: "구매 완료",
+        ChatStatus.ABANDONED: "구매 포기"
+    }
+    return status_display_map.get(status, "고민 중")
+from app.chat.models import Chat
+from app.chat.schemas import ChatListItem   
 from app.users.models import User
 from app.products.models import Product, UserProduct
 from app.products.parsers.item_parser import extract_features_from_url
@@ -88,7 +109,7 @@ def clean_persona_code(user):
     return code
 
 
-def parse_and_save_product(db: Session, url: str, user: User):
+def parse_and_save_product(db: Session, url: str, user: User, user_product_id: int = None):
     """Background Task: URL 파싱 → 분석 → DB 저장 → Redis 캐시."""
     try:
         user_persona_code = clean_persona_code(user)
@@ -104,7 +125,7 @@ def parse_and_save_product(db: Session, url: str, user: User):
         impulse_score = int(risk_res.get('total_score', 0))
         total_pref_score = int(pref_out['total_score'])
 
-        # DB 저장
+        # DB 저장 (상품 조회/생성)
         product = db.query(Product).filter(Product.product_name == result['product_name']).first()
         if not product:
             product = Product(
@@ -127,13 +148,41 @@ def parse_and_save_product(db: Session, url: str, user: User):
             db.add(product)
             db.flush()
 
-        user_prod = UserProduct(
-            user_id=user.user_id, product_id=product.product_id,
-            user_type=user_persona_code, risk_score_1=impulse_score,
-            status="IN_PROGRESS", preference_score=total_pref_score
-        )
-        db.add(user_prod)
-        db.commit()
+        # 유저-상품 매핑 갱신 (또는 저장)
+        if user_product_id:
+            user_prod = db.query(UserProduct).filter(UserProduct.user_product_id == user_product_id).first()
+            if user_prod:
+                user_prod.product_id = product.product_id
+                user_prod.impulse_score = impulse_score
+                user_prod.preference_score = total_pref_score
+                user_prod.status = "PENDING"
+                user_prod.is_purchased = 0
+                db.commit()
+            else:
+                user_prod = UserProduct(
+                    user_id=user.user_id, 
+                    product_id=product.product_id,
+                    user_type=user_persona_code, 
+                    impulse_score=impulse_score,
+                    status="PENDING",
+                    preference_score=total_pref_score,
+                    is_purchased=0
+                )
+                db.add(user_prod)
+                db.commit()
+        else:
+            user_prod = UserProduct(
+                user_id=user.user_id, 
+                product_id=product.product_id,
+                user_type=user_persona_code, 
+                impulse_score=impulse_score,
+                status="PENDING",
+                preference_score=total_pref_score,
+                is_purchased=0
+            )
+            db.add(user_prod)
+            db.commit()
+
 
         # 실제 수치 데이터
         feature_values = {
@@ -157,8 +206,8 @@ def parse_and_save_product(db: Session, url: str, user: User):
         }
 
         # ✅ Redis 저장 (신규 키 네이밍: chat:{user_product_id}:item_json)
-        chat_id = user_prod.user_product_id
-        cache_key = f"chat:{chat_id}:item_json"
+        user_product_id = user_prod.user_product_id
+        cache_key = f"chat:{user_product_id}:item_json"
         redis_client.setex(cache_key, 86400, json.dumps(details, ensure_ascii=False))
         print(f"✅ [service] 상품 분석 캐시 저장: {cache_key}")
 
@@ -193,10 +242,6 @@ def print_analysis_report(user_id, persona, p_name, pref, risk, prompt_data):
     print(f" 📝 [PROMPT INJECTION DATA]")
     print(json.dumps(prompt_data, indent=4, ensure_ascii=False))
     print("-" * 80)
-    print(f" ✅ 분석 및 프롬프트 준비 완료 (Timestamp: {datetime.datetime.now().strftime('%H:%M:%S')})")
-    print("=" * 80 + "\n")
-
-
 # ──────────────────────────────────────────────
 # 2. 세션 초기화 (finalize-survey에서 호출)
 # ──────────────────────────────────────────────
@@ -204,7 +249,7 @@ async def init_chat_session(
     db: Session,
     user_id: int,
     product_id: int,
-    chat_id: int,
+    user_product_id: int,
     user_answers: dict,
 ) -> str:
     """
@@ -213,9 +258,9 @@ async def init_chat_session(
     2) Redis에 ctx_fixed 저장
     3) 첫 Gemini 호출 → 첫 응답 반환
     """
-    # DB 조회
+    # DB에 저장된 분석 결과 조회
     record = db.query(UserProduct).filter(
-        UserProduct.user_product_id == chat_id
+        UserProduct.user_product_id == user_product_id
     ).first()
     product = db.query(Product).filter(Product.product_id == product_id).first()
     user = db.query(User).filter(User.user_id == user_id).first()
@@ -224,7 +269,7 @@ async def init_chat_session(
         return "데이터를 불러오는 데 실패했어. 다시 시도해줄래? 🧐"
 
     # ── Redis에서 분석 상세 데이터 가져오기 ──
-    cache_key = f"chat:{chat_id}:item_json"
+    cache_key = f"chat:{user_product_id}:item_json"
     cached_raw = redis_client.get(cache_key)
 
     if not cached_raw:
@@ -240,33 +285,32 @@ async def init_chat_session(
     else:
         details = json.loads(cached_raw)
 
-    # ── 모드 결정 + 가이드 데이터 ──
+    # 2. 모드 결정 및 가이드 데이터 추출
     mode = determine_mode([
-        {"q_id": 1, "answer_id": user_answers.get('q1')},
-        {"q_id": 2, "answer_id": user_answers.get('q2')},
-        {"q_id": 3, "answer_id": user_answers.get('q3')}
+        {"q_id": 1, "answer_id": user_answers.get('q1', 1)},
+        {"q_id": 2, "answer_id": user_answers.get('q2', 1)},
+        {"q_id": 3, "answer_id": user_answers.get('q3', 1)}
     ])
-
-    b_score = (
-        SURVEY_SCORE_TABLE["q1"].get(user_answers.get('q1'), (0, 0))[0]
-        + SURVEY_SCORE_TABLE["q2"].get(user_answers.get('q2'), (0, 0))[0]
-        + SURVEY_SCORE_TABLE["q3"].get(user_answers.get('q3'), (0, 0))[0]
-    )
+    
+    b_score = SURVEY_SCORE_TABLE["q1"].get(user_answers.get('q1', 1), (0,0))[0] + \
+              SURVEY_SCORE_TABLE["q2"].get(user_answers.get('q2', 1), (0,0))[0] + \
+              SURVEY_SCORE_TABLE["q3"].get(user_answers.get('q3', 1), (0,0))[0]
+    
     level_num = min(5, max(1, b_score))
     level_key = f"Level {level_num}"
     guide_info = IMPULSE_GUIDE_DATA.get(level_key)
 
     persona_suffix = record.user_type[-1].lower()
     persona_prefix = "default_" if persona_suffix == 't' else "myway_"
-
+    
     p_type = details.get('personal_reason_type', 'positive')
     personal_text_dict = PERSONAL_RISK_TEXT if p_type == 'risk' else PERSONAL_POS_TEXT
 
     # ── 완전체 JSON 조립 ──
     final_input_json = {
         "meta": {
-            "trace_id": str(re.sub(r'[^a-zA-Z0-9]', '', str(datetime.datetime.now().timestamp()))),
-            "timestamp": datetime.datetime.now().isoformat()
+            "trace_id": str(re.sub(r'[^a-zA-Z0-9]', '', str(datetime.now().timestamp()))),
+            "timestamp": datetime.now().isoformat()
         },
         "user_context": {
             "persona_type": record.user_type,
@@ -282,12 +326,11 @@ async def init_chat_session(
         },
         "mode_block": {"current_mode": mode},
         "impulse_block": {
-            "impulse_score": record.risk_score_1,
+            "impulse_score": record.impulse_score,
             "impulse_reason_top2": [
                 {
                     "feature_key": cause["feature_key"],
                     "value": details.get('feature_values', {}).get(cause["feature_key"]),
-                    "weight": round(cause["score_contribution"] / max(1, record.risk_score_1), 2),
                     "guide": guide_info["features"].get(
                         f"review_count_{persona_suffix}" if cause["feature_key"] == "review_count" else cause["feature_key"],
                         "이 부분 주의깊게 봐!"
@@ -336,19 +379,15 @@ async def init_chat_session(
     }
 
     # ── Redis에 ctx_fixed 저장 (비동기) ──
-    await repository.save_ctx_fixed(chat_id, final_input_json)
-    print(f"✅ [service] ctx_fixed 저장 완료: chat:{chat_id}:ctx_fixed")
+    await repository.save_ctx_fixed(user_product_id, final_input_json)
+    logger.info(f"✅ [service] ctx_fixed 저장 완료: chat:{user_product_id}:ctx_fixed")
 
     # ── DB에도 백업 ──
     record.prompt_data = json.dumps(final_input_json, ensure_ascii=False)
     db.commit()
 
     # ── 로그 ──
-    print("\n" + "=" * 50)
-    print(f"🚀 LLM INPUT JSON (Trace: {final_input_json['meta']['trace_id']})")
-    print("-" * 50)
-    print(json.dumps(final_input_json, indent=4, ensure_ascii=False))
-    print("=" * 50 + "\n")
+    logger.debug(f"🚀 LLM INPUT JSON (Trace: {final_input_json['meta']['trace_id']}):\n{json.dumps(final_input_json, indent=4, ensure_ascii=False)}")
 
     # ── 첫 Gemini 호출 ──
     first_input = "설문 완료!"
@@ -361,21 +400,21 @@ async def init_chat_session(
     )
 
     # ── 히스토리에 첫 턴 저장 ──
-    await repository.push_history(chat_id, "user", first_input)
-    await repository.push_history(chat_id, "assistant", clean_text)
+    await repository.push_history(user_product_id, "user", first_input)
+    await repository.push_history(user_product_id, "assistant", clean_text)
 
     if decision_code:
-        print(f"🎯 [DECISION CODE]: {decision_code}")
+        logger.info(f"🎯 [DECISION CODE]: {decision_code}")
 
     return clean_text
 
 
 # ──────────────────────────────────────────────
-# 3. 채팅 메시지 처리 (/{chat_id}/messages/)
+# 3. 채팅 메시지 처리 (/{user_product_id}/messages/)
 # ──────────────────────────────────────────────
 async def handle_message(
     db: Session,
-    chat_id: int,
+    user_product_id: int,
     user_input: str,
 ) -> dict:
     """
@@ -383,17 +422,17 @@ async def handle_message(
     Returns: {"message": str, "is_exit": bool, "decision_code": str|None}
     """
     # ── 세션 데이터 로드 (MGET) ──
-    _, ctx_fixed = await repository.get_session_data(chat_id)
+    _, ctx_fixed = await repository.get_session_data(user_product_id)
 
     if not ctx_fixed:
         # Redis 만료 시 DB에서 복구
         record = db.query(UserProduct).filter(
-            UserProduct.user_product_id == chat_id
+            UserProduct.user_product_id == user_product_id
         ).first()
         if record and record.prompt_data:
             ctx_fixed = json.loads(record.prompt_data)
-            await repository.save_ctx_fixed(chat_id, ctx_fixed)
-            print(f"🔄 [service] DB에서 ctx_fixed 복구: chat:{chat_id}")
+            await repository.save_ctx_fixed(user_product_id, ctx_fixed)
+            logger.info(f"🔄 [service] DB에서 ctx_fixed 복구: chat:{user_product_id}")
         else:
             return {
                 "message": "세션 데이터를 찾을 수 없어. 처음부터 다시 시작해줄래? 🧐",
@@ -402,7 +441,7 @@ async def handle_message(
             }
 
     # ── 히스토리 로드 ──
-    history = await repository.get_history(chat_id)
+    history = await repository.get_history(user_product_id)
 
     # ── 현재 step/turn 계산 ──
     user_msgs = [m for m in history if m.get("role") == "user"]
@@ -422,16 +461,17 @@ async def handle_message(
     )
 
     # ── 히스토리 저장 (비동기) ──
-    await repository.push_history(chat_id, "user", user_input)
-    await repository.push_history(chat_id, "assistant", clean_text)
+    await repository.push_history(user_product_id, "user", user_input)
+    await repository.push_history(user_product_id, "assistant", clean_text)
 
     is_exit = (next_step == "EXIT") or (next_step == 2)
     if decision_code:
-        print(f"🎯 [DECISION CODE]: {decision_code}")
+        logger.info(f"🎯 [DECISION CODE]: {decision_code}")
     if is_exit:
-        print(f"🏁 [service] 대화 종료 감지 (chat_id={chat_id})")
+        logger.info(f"🏁 [service] 대화 종료 감지 (user_product_id={user_product_id})")
 
     return {
+        "user_product_id": user_product_id,
         "message": clean_text,
         "is_exit": is_exit,
         "decision_code": decision_code,
@@ -441,21 +481,237 @@ async def handle_message(
 # ──────────────────────────────────────────────
 # 설문 텍스트 변환 헬퍼 (기존 유지)
 # ──────────────────────────────────────────────
-def get_q1_text(val: int):
+def get_q1_text(val: Optional[int]):
     mapping = {1: "방금 담았어 / 1시간 이내", 2: "1~2일 이내", 3: "일주일 이내", 4: "일주일 이상", 5: "한달 이상"}
     return mapping.get(val, "방금 전")
 
 
-def get_q2_text(val: int):
+def get_q2_text(val: Optional[int]):
     mapping = {1: "사도 되는지 확인받고 싶어서", 2: "그냥 이 옷 어떤가 궁금해서", 3: "오래 고민했는데 결정이 안 나서", 4: "사고나서 후회할까봐 걱정돼서"}
     return mapping.get(val, "궁금해서")
 
 
-def get_q3_text(val: int):
+def get_q3_text(val: Optional[int]):
     mapping = {1: "사고싶긴 한데 비슷한 옷들이 많아서 고민이 돼", 2: "장바구니 옷 중에 이게 제일 마음에 들어", 3: "이미 코디까지 다 생각해 둬서 사면 잘 입을 것 같아", 4: "다 좋은데.. 혹시 더 나은 게 있을까봐 불안해"}
     return mapping.get(val, "확신 없음")
 
 
-def get_qc_text(val: int):
-    mapping = {1: "가성비", 2: "시즌오프 세일 / 품절 임박", 3: "요즘 유행템 / 연예인 착용", 4: "소재 및 퀄리티", 5: "MD/인플루언서 픽", 6: "모델의 착용 핏", 7: "빠른 배송 필요"}
+def get_qc_text(val: Optional[int]):
+    mapping = {
+        1: "가성비",
+        2: "시즌오프 세일 / 품절 임박",
+        3: "요즘 유행템 / 연예인 착용",
+        4: "소재 및 퀄리티",
+        5: "MD/인플루언서 픽",
+        6: "모델의 착용 핏",
+        7: "빠른 배송 필요"
+    }
     return mapping.get(val, "디자인")
+
+import re
+
+def parse_llm_response(text: str):
+    """
+    LLM 응답에서 [STEP_XXX: N] 등 대괄호로 된 모든 태그를 분리하고 본문만 남김
+    """
+    # 1. 숫자 단계 추출 (STEP_MOVED나 STEP_HELD 뒤의 숫자 찾기)
+    step_match = re.search(r"\[STEP_(?:MOVED|HELD):\s*(\d+)\]", text)
+    next_step = int(step_match.group(1)) if step_match else 1 # 기본값 1
+    
+    # 2. 보류 여부 추출
+    is_held = "[STEP_HELD" in text or "[IS_HELD: TRUE]" in text
+    
+    # 3. 🔥 대괄호([])로 감싸진 모든 시스템 태그 삭제
+    # 이 정규식은 [내용] 형태를 찾아서 통째로 지워줘.
+    clean_msg = re.sub(r"\[.*?\]", "", text)
+    clean_msg = clean_msg.strip()
+    
+    return clean_msg, next_step, is_held
+
+def get_time_display(dt: datetime) -> str:
+    if not dt: return "알 수 없음"
+    now = datetime.now()
+    diff = now - dt
+    if diff.days == 0: return "오늘"
+    if diff.days == 1: return "어제"
+    return f"{diff.days}일 전"
+
+def get_user_chat_list(db: Session, user_id: int):
+    # 1. 각 product_id별로 가장 최신(updated_at 기준)의 user_product_id를 찾는 서브쿼리
+    from sqlalchemy import func
+    
+    subquery = (
+        db.query(
+            UserProduct.product_id,
+            func.max(UserProduct.updated_at).label("max_updated_at")
+        )
+        .filter(UserProduct.user_id == user_id)
+        .group_by(UserProduct.product_id)
+        .subquery()
+    )
+
+    # 2. 서브쿼리와 조인하여 각 상품별 최신 채팅방 레코드만 가져오기
+    results = (
+        db.query(UserProduct, Product)
+        .join(Product, UserProduct.product_id == Product.product_id)
+        .join(
+            subquery,
+            (UserProduct.product_id == subquery.c.product_id) &
+            (UserProduct.updated_at == subquery.c.max_updated_at)
+        )
+        .filter(UserProduct.user_id == user_id)
+        .order_by(UserProduct.updated_at.desc())
+        .all()
+    )
+
+    if not results:
+        return {"latest_chat": None, "all_chats": []}
+
+    chat_items = []
+    for user_prod, prod in results:
+        item = ChatListItem(
+            user_product_id=user_prod.user_product_id,
+            product_name=prod.product_name,
+            product_img=prod.product_img,
+            price=prod.price,
+            last_chat_time=get_time_display(user_prod.updated_at),
+            status_label=get_status_label(user_prod.status, user_prod.is_purchased),
+            is_purchased=user_prod.is_purchased
+        )
+        chat_items.append(item)
+
+    return {
+        "latest_chat": chat_items[0], 
+        "all_chats": chat_items      
+    }
+
+def save_chat_message(db: Session, user_id: int, user_product_id: int, role: str, content: str):
+    """DB와 Redis 양쪽에 채팅 메시지를 저장함"""
+    # 1. DB 저장
+    new_chat = Chat(
+        user_id=user_id,
+        user_product_id=user_product_id,
+        role=role,
+        content=content,
+        created_at=datetime.now()
+    )
+    db.add(new_chat)
+    db.commit()
+    db.refresh(new_chat)
+
+    # 2. Redis 저장 (리스트 형태: chat_messages:{user_product_id})
+    cache_key = f"chat_messages:{user_product_id}"
+    msg_data = {
+        "role": role,
+        "content": content,
+        "created_at": new_chat.created_at.isoformat()
+    }
+    
+    # 리스트 끝에 추가하고, 1시간(3600초) 만료 설정
+    redis_client.rpush(cache_key, json.dumps(msg_data, ensure_ascii=False))
+    redis_client.expire(cache_key, 3600)
+    
+    return new_chat
+
+def get_chat_messages(db: Session, user_product_id: int, user_id: int):
+    # 1. 상단에 보여줄 상품 정보 가져오기 (이건 DB에서 가져옴)
+    result = (
+        db.query(UserProduct, Product)
+        .join(Product, UserProduct.product_id == Product.product_id)
+        .filter(UserProduct.user_product_id == user_product_id)
+        .filter(UserProduct.user_id == user_id)
+        .first()
+    )
+
+    if not result:
+        return None
+
+    user_prod, prod = result
+
+    # 2. Redis에서 메시지 목록 먼저 확인
+    cache_key = f"chat_messages:{user_product_id}"
+    cached_msgs = redis_client.lrange(cache_key, 0, -1)
+
+    if cached_msgs:
+        print(f"✅ Redis에서 채팅 메시지 {len(cached_msgs)}개를 불러왔어! (Key: {cache_key})")
+        messages = [json.loads(m) for m in cached_msgs]
+    else:
+        # 3. Redis에 없으면 DB에서 가져오기
+        print(f"⚠️ Redis에 메시지가 없어 DB에서 가져오는 중... (Key: {cache_key})")
+        db_messages = (
+            db.query(Chat)
+            .filter(Chat.user_product_id == user_product_id)
+            .order_by(Chat.created_at.asc())
+            .all()
+        )
+        
+        messages = []
+        for m in db_messages:
+            msg_dict = {
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat()
+            }
+            messages.append(msg_dict)
+            # 가져온 김에 Redis에도 채워두기
+            redis_client.rpush(cache_key, json.dumps(msg_dict, ensure_ascii=False))
+        
+        if messages:
+            redis_client.expire(cache_key, 3600)
+
+    return {
+        "user_product_id": user_prod.user_product_id, 
+        "product_name": prod.product_name,
+        "product_img": prod.product_img,
+        "price": prod.price,
+        "status_label": get_status_label(user_prod.status, user_prod.is_purchased),
+        "messages": messages
+    }
+
+def finish_chat(db: Session, user_product_id: int, user_id: int):
+    """채팅방을 종료 상태(FINISHED)로 변경"""
+    record = (
+        db.query(UserProduct)
+        .filter(UserProduct.user_product_id == user_product_id)
+        .filter(UserProduct.user_id == user_id)
+        .first()
+    )
+    
+    if not record:
+        return False
+        
+    record.status = ChatStatus.FINISHED
+    db.commit()
+    return True
+
+def create_initial_user_product(db: Session, user_id: int, user_persona_code: str):
+    """채팅 시작 시 초기 UserProduct 레코드 생성"""
+    user_prod = UserProduct(
+        user_id=user_id,
+        product_id=0,
+        user_type=user_persona_code,
+        status="PENDING"
+    )
+    db.add(user_prod)
+    db.commit()
+    db.refresh(user_prod)
+    return user_prod
+
+def finalize_chat_survey(db: Session, user_id: int, user_product_id: int, user_answers: dict, first_response: str):
+    """설문 완료 시 질문/답변 및 AI 첫 응답 저장"""
+    # 1. 설문 질문과 답변 저장
+    survey_pairs = [
+        ("이거 장바구니/찜에 담은 지 얼마나 됐어?", get_q1_text(user_answers.get('q1'))),
+        ("나한테 왜 연락한 거야?", get_q2_text(user_answers.get('q2'))),
+        ("이 옷, 이미 거의 사기로 마음 정한 상태야? 아니면 아직 확신이 부족해?", get_q3_text(user_answers.get('q3'))),
+        ("이 옷의 어떤 점이 네 마음을 뺏었어?", get_qc_text(user_answers.get('qc')))
+    ]
+
+    for question, answer in survey_pairs:
+        save_chat_message(db, user_id, user_product_id, "assistant", question)
+        save_chat_message(db, user_id, user_product_id, "user", answer)
+
+    # 2. AI의 첫 분석 답변 저장
+    save_chat_message(db, user_id, user_product_id, "assistant", first_response)
+    
+    return True
