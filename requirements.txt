@@ -23,7 +23,7 @@ selenium==4.40.0
 selenium-wire==5.1.0
 undetected-chromedriver==3.5.5
 webdriver-manager==4.0.2
-blinker
+blinker==1.5.0
 
 # --- [DB & Infrastructure] ---
 SQLAlchemy==2.0.46
