@@ -82,15 +82,27 @@ def normalize_item_schema(item: dict) -> dict:
     return x
 
 def format_actual_value(feat_name, actual_val):
-    # 할인율, 리뷰수, 리뷰점수만 수치 표시
-    if feat_name == 'discount_rate': 
-        return f"{int(_safe_float(actual_val))}%"
-    elif feat_name == 'review_count': 
-        return f"{int(_safe_float(actual_val))}개"
-    elif feat_name == 'review_score': 
-        return f"{_safe_float(actual_val)}점"
+    # 쇼핑몰/배송 정보 한글 매핑
+    FEATURE_KO = {
+        'discount_rate': '할인율', 'review_count': '리뷰 수', 'review_score': '평점',
+        'product_likes': '찜 수', 'free_shipping': '무료 배송', 'is_direct_shipping': '빠른 배송',
+        'sim_trend_hype': '유행/대란 키워드', 'sim_temptation': '자극적 홍보 문구',
+        'sim_fit_anxiety': '핏/체형 보정 문구', 'sim_quality_logic': '소재/퀄리티 강조',
+        'sim_bundle': '1+1/묶음 할인', 'sim_confidence': 'MD추천/보증'
+    }
     
-    # 나머지는 수치 없이 이름만 나오도록 빈 값 리턴
+    val_str = ""
+    if feat_name == 'discount_rate': 
+        val_str = f"{int(_safe_float(actual_val))}%"
+    elif feat_name == 'review_count': 
+        val_str = f"{int(_safe_float(actual_val))}개"
+    elif feat_name == 'review_score': 
+        val_str = f"{_safe_float(actual_val)}점"
+
+    if feat_name in FEATURE_KO:
+        label = FEATURE_KO[feat_name]
+        return f"{label} {val_str}".strip()
+        
     return ""
 
 # =========================
@@ -313,6 +325,29 @@ def init_profile_from_global_stats(d: int, scaler_mean: pd.Series, scaler_std: p
         "T": float(T),
     }
 
+def reconstruct_profile(mu_like_str: str, mu_regret_str: str, n_pos: int, n_neg: int, 
+                        scaler_mean: pd.Series, scaler_std: pd.Series, T: float = 1.0):
+    """DB에 저장된 JSON 문자열과 카운트 정보를 딕셔너리 프로필로 복원"""
+    d = len(FEATURE_COLS)
+    
+    def _to_array(s):
+        if not s: return np.zeros(d, dtype=float)
+        try:
+            val = json.loads(s) if isinstance(s, str) else s
+            return np.array(val, dtype=float)
+        except:
+            return np.zeros(d, dtype=float)
+
+    return {
+        "mu_like": _to_array(mu_like_str),
+        "mu_regret": _to_array(mu_regret_str),
+        "n_pos": int(n_pos or 0),
+        "n_neg": int(n_neg or 0),
+        "scaler_mean": scaler_mean,
+        "scaler_std": scaler_std,
+        "T": float(T),
+    }
+
 def profile_n_effective(profile) -> int:
     return int(profile.get("n_pos", 0) + profile.get("n_neg", 0))
 
@@ -367,25 +402,31 @@ def score_personal(item_json: dict, profile: dict, topk=2):
     score01 = float(sigmoid(raw))
     score100 = int(round(score01 * 100))
 
-    # 이유 추출 (platform 제외)
+    # 🚩 [NEW] 이유 추출 고도화 (prior와 동일한 방식)
+    reason_results = []
     valid_idx = [i for i, f in enumerate(FEATURE_COLS) if f != "platform"]
     
-    # 점수에 따라 긍정(pos) 또는 위험(rsk) 요인 2개 선정
-    idx_pos = sorted(valid_idx, key=lambda i: contrib[i], reverse=True)[:topk]
-    idx_rsk = sorted(valid_idx, key=lambda i: contrib[i])[:topk]
+    for i in valid_idx:
+        f_name = FEATURE_COLS[i]
+        feat_contrib = contrib[i]
+        reason_results.append({'name': f_name, 'contrib': feat_contrib})
 
-    # 🔥 실제 데이터를 매칭하는 로직 추가
-    def get_drivers_with_data(indices):
-        drivers = []
-        for i in indices:
-            f_name = FEATURE_COLS[i]
+    # 정렬: 기여도 높은 순(긍정) / 낮은 순(위험)
+    is_risk = score100 <= 60
+    reason_results = sorted(reason_results, key=lambda x: x['contrib'], reverse=not is_risk)
+    
+    top2_with_data = []
+    seen = set()
+    for res in reason_results:
+        f_name = res['name']
+        if f_name not in seen:
             val = item_json.get(f_name, 0)
-            drivers.append((f_name, format_actual_value(f_name, val)))
-        return drivers
+            desc = format_actual_value(f_name, val)
+            top2_with_data.append((f_name, desc))
+            seen.add(f_name)
+        if len(top2_with_data) >= topk: break
 
-    if score100 <= 60:
-        return score100, "risk", get_drivers_with_data(idx_rsk)
-    return score100, "positive", get_drivers_with_data(idx_pos)
+    return score100, ("risk" if is_risk else "positive"), top2_with_data
 
 
 # =========================

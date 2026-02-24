@@ -1,8 +1,14 @@
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-
 from app.products.models import UserProduct
+from app.users.models import User
 from app.chat.after_chat import schemas
+import json
+import numpy as np  # 이 줄을 추가하세요!
+
+# 🚩 [추가] 선호도 프로필 업데이트용 임포트
+from app.chat.service import load_user_profile, save_user_profile
+from app.chat.logic.final_prefer import update_profile
 
 def update_purchase_status(db: Session, user_id: int, req: schemas.PurchaseStatusRequest) -> schemas.PurchaseStatusResponse:
     """사용자가 실제로 구매했는지 여부 기록하기"""
@@ -16,10 +22,6 @@ def update_purchase_status(db: Session, user_id: int, req: schemas.PurchaseStatu
 
     # 구매 상태 업데이트
     up.is_purchased = 1 if req.is_purchased else 0
-    # 필요한 경우 완료 시간을 기록
-    if not up.completed_at:
-        up.completed_at = datetime.now()
-
     db.commit()
 
     return schemas.PurchaseStatusResponse(
@@ -43,6 +45,26 @@ def submit_feedback(db: Session, user_id: int, req: schemas.FeedbackSubmitReques
     if req.rating is not None:
         up.feedback_rating = req.rating
         
+        # 🚩 [추가] 피드백 점수에 따라 유저 취향 프로필(mu_like, mu_regret) 업데이트
+        # 만족(4,5점) -> mu_like 업데이트 // 불만족(1,2점) -> mu_regret 업데이트
+        try:
+            user = db.query(User).filter(User.user_id == user_id).first()
+            if user and up.prompt_data:
+                ctx_fixed = json.loads(up.prompt_data)
+                product_features = ctx_fixed.get("product_context", {})
+                
+                label = None
+                if req.rating >= 3: label = "positive"
+                elif req.rating <= 2: label = "negative"
+                
+                if label:
+                    profile = load_user_profile(user)
+                    new_profile = update_profile(profile, product_features, label)
+                    save_user_profile(db, user, new_profile)
+                    print(f"✅ 피드백 기반 프로필 업데이트 완료 ({label}, rating: {req.rating})")
+        except Exception as e:
+            print(f"Warning: Failed to update user profile from feedback: {e}")
+
     db.commit()
 
     return schemas.FeedbackSubmitResponse(

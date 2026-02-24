@@ -16,3 +16,10 @@ class User(Base):
     # 드디어 추가된 쇼핑몰과 추구미!
     favorite_shops = Column(TEXT, nullable=True) # ["무신사", "지그재그"] 형태로 저장될 예정
     chu_gu_me = Column(String(30), nullable=True)
+
+    # 🚩 [추가] 개인화 선호도 벡터 및 카운트
+    # 12가지 피처의 평균값을 JSON 문자열로 저장
+    mu_like = Column(TEXT, nullable=True)
+    mu_regret = Column(TEXT, nullable=True)
+    n_pos = Column(Integer, default=0)
+    n_neg = Column(Integer, default=0)
