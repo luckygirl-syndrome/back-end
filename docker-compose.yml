@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    image: ttobaba-backend:latest
+    container_name: ttobaba-backend
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - ttobaba-network
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+    - "6379:6379"
+    container_name: ttobaba-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - ./redis_data:/data
+    restart: unless-stopped
+    networks:
+      - ttobaba-network
+
+networks:
+  ttobaba-network:
+    driver: bridge

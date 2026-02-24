@@ -8,6 +8,8 @@ from app.core.config import settings
 from fastapi.security import APIKeyHeader
 import json
 from app.core.security import create_access_token, decode_access_token
+from app.products.models import UserProduct, Product
+from sqlalchemy import func
 
 router = APIRouter(prefix="/api", tags=["유저 관리"])
 api_key_header = APIKeyHeader(name="Authorization")
@@ -115,3 +117,38 @@ def update_chugume(data: schemas.ChugumeUpdate, db: Session = Depends(get_db), c
 @router.get("/profile/chugume")
 def get_chugume(current_user: models.User = Depends(get_current_user)):
     return {"chugume_type": current_user.chu_gu_me}
+
+# 8. 나의 옷장 통계 조회
+@router.get("/profile/closet", response_model=schemas.ClosetStatsRead)
+def get_closet_stats(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # is_purchased 조건에 따라 데이터를 집계
+    stats = db.query(
+        UserProduct.is_purchased,
+        func.count(UserProduct.product_id).label("count"),
+        func.sum(Product.price).label("sum_price")
+    ).outerjoin(
+        Product, UserProduct.product_id == Product.product_id
+    ).filter(
+        UserProduct.user_id == current_user.user_id,
+        UserProduct.is_purchased.in_([0, 1])
+    ).group_by(
+        UserProduct.is_purchased
+    ).all()
+    
+    bought_count, bought_price = 0, 0
+    dropped_count, dropped_price = 0, 0
+    
+    for row in stats:
+        if row.is_purchased == 1:
+            bought_count = row.count or 0
+            bought_price = int(row.sum_price or 0)
+        elif row.is_purchased == 0:
+            dropped_count = row.count or 0
+            dropped_price = int(row.sum_price or 0)
+            
+    return {
+        "bought_count": bought_count,
+        "bought_price": bought_price,
+        "dropped_count": dropped_count,
+        "dropped_price": dropped_price
+    }
