@@ -40,12 +40,15 @@ from app.chat.schemas import ChatListItem
 from app.users.models import User
 from app.products.models import Product, UserProduct
 from app.products.parsers.item_parser import extract_features_from_url
+from app.chat.logic.impulse_calculator import analyze_product_risk, RISK_LEVELS
+from app.chat.logic.final_prefer import infer_all
 from app.chat.logic.impulse_calculator import analyze_product_risk
 from app.chat.logic.final_prefer import infer_all, reconstruct_profile, update_profile, load_prior_artifacts
 from app.chat.logic.user_survey import determine_mode
 from .constants import (
     IMPULSE_GUIDE_DATA, SURVEY_TEXT_MAPPING, DEFAULT_VALUES,
     SURVEY_SCORE_TABLE, PRIOR_TEXT, PERSONAL_POS_TEXT, PERSONAL_RISK_TEXT,
+    STRATEGY_MATRIX
 )
 from . import repository
 from . import agent
@@ -337,13 +340,12 @@ async def init_chat_session(
         {"q_id": 3, "answer_id": user_answers.get('q3', 1)}
     ])
     
-    b_score = SURVEY_SCORE_TABLE["q1"].get(user_answers.get('q1', 1), (0,0))[0] + \
-              SURVEY_SCORE_TABLE["q2"].get(user_answers.get('q2', 1), (0,0))[0] + \
-              SURVEY_SCORE_TABLE["q3"].get(user_answers.get('q3', 1), (0,0))[0]
+    impulse_score = record.impulse_score if record.impulse_score is not None else 0
+    risk_stage_info = next((lvl for lvl in RISK_LEVELS if lvl[0] <= impulse_score <= lvl[1]), RISK_LEVELS[-1])
+    level_num = risk_stage_info[3]
     
-    level_num = min(5, max(1, b_score))
-    level_key = f"Level {level_num}"
-    guide_info = IMPULSE_GUIDE_DATA.get(level_key)
+    strategy_info = STRATEGY_MATRIX.get(mode, STRATEGY_MATRIX["DECIDER"]).get(level_num, STRATEGY_MATRIX["DECIDER"][1])
+    guide_info = IMPULSE_GUIDE_DATA.get(mode, IMPULSE_GUIDE_DATA["DECIDER"])
 
     persona_suffix = record.user_type[-1].lower()
     persona_prefix = "default_" if persona_suffix == 't' else "myway_"
@@ -418,9 +420,12 @@ async def init_chat_session(
         },
         "strategy_matrix": {
             "level": level_num,
-            "label": guide_info["label"],
-            "goal": guide_info["goal"],
-            "strategy": guide_info["strategy"]
+            "label": strategy_info.get("label", ""),
+            "goal": strategy_info.get("goal", ""),
+            "rationale": strategy_info.get("rationale", ""),
+            "stance": strategy_info.get("stance", ""),
+            "tone": strategy_info.get("tone", ""),
+            "strategy": strategy_info.get("strategy", "")
         }
     }
 
