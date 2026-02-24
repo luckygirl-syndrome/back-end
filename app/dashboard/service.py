@@ -12,7 +12,7 @@ def get_home_dashboard(db: Session, user_id: int) -> schemas.HomeDashboardRespon
     if not user:
         raise ValueError("유저를 찾을 수 없습니다.")
 
-    user_name = user.name
+    user_name = user.nickname
 
     # 절약한 금액 총합 계산 (is_purchased = 0 인 항목들의 원래 가격 합 - 실제 구현 시 price나 할인가 적용 방식 등 논의 필요)
     # 현재는 product의 price 총합으로 임시 적용
@@ -54,7 +54,8 @@ def get_unbought_receipts(db: Session, user_id: int) -> schemas.ReceiptListRespo
         Product, UserProduct.product_id == Product.product_id
     ).filter(
         UserProduct.user_id == user_id,
-        UserProduct.is_purchased == 0
+        UserProduct.is_purchased == 0,
+        UserProduct.status == "FINISHED"
     ).order_by(UserProduct.completed_at.desc()).all()
 
     items = []
@@ -80,7 +81,8 @@ def get_receipt_detail(db: Session, user_id: int, user_product_id: int) -> schem
     ).filter(
         UserProduct.user_id == user_id,
         UserProduct.user_product_id == user_product_id,
-        UserProduct.is_purchased == 0
+        UserProduct.is_purchased == 0,
+        UserProduct.status == "ABANDONED"
     ).first()
 
     if not result:
@@ -120,7 +122,8 @@ def get_considering_items(db: Session, user_id: int) -> schemas.ConsideringListR
         Product, UserProduct.product_id == Product.product_id
     ).filter(
         UserProduct.user_id == user_id,
-        UserProduct.is_purchased.is_(None) # 아직 결정나지 않은 상태
+        UserProduct.is_purchased == 0,
+        (UserProduct.status == "PENDING") | (UserProduct.status == "FINISHED") | (UserProduct.status == "ANALYZING")
     ).order_by(UserProduct.requested_at.desc()).all()
 
     items = []
