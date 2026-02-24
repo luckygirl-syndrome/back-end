@@ -13,6 +13,7 @@ import traceback
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ from app.products.models import Product, UserProduct
 from app.products.parsers.item_parser import extract_features_from_url
 from app.chat.logic.impulse_calculator import analyze_product_risk, RISK_LEVELS
 from app.chat.logic.final_prefer import infer_all
+from app.chat.logic.impulse_calculator import analyze_product_risk
+from app.chat.logic.final_prefer import infer_all, reconstruct_profile, update_profile, load_prior_artifacts
 from app.chat.logic.user_survey import determine_mode
 from .constants import (
     IMPULSE_GUIDE_DATA, SURVEY_TEXT_MAPPING, DEFAULT_VALUES,
@@ -82,6 +85,37 @@ FEATURE_KO = {
 # ──────────────────────────────────────────────
 # 1. 상품 파싱 + 저장 (Background Task — 동기)
 # ──────────────────────────────────────────────
+# 🚩 [추가] 유저 프로필 관리 헬퍼
+def load_user_profile(user: User):
+    """User DB의 mu_like, mu_regret 등 컬럼 정보를 가져와 final_prefer용 프로필로 복원"""
+    # 0. 필요한 전적 아티팩트(scaler 등) 로드
+    _, scaler_cont, meta, _ = load_prior_artifacts(PRIOR_MODEL_DIR)
+    
+    # 1. 아티팩트에서 mean/std Serise 형태로 준비 (final_prefer 가 요구하는 형식)
+    import pandas as pd
+    # index에서 delta_ 접두어를 떼어줌 (final_prefer의 PERSONAL_SCALE_COLS 매칭용)
+    new_index = [c.replace("delta_", "") for c in meta["SCALE_COLS"]]
+    s_mean = pd.Series(scaler_cont.mean_, index=new_index)
+    s_std = pd.Series(np.sqrt(scaler_cont.var_) + 1e-9, index=new_index)
+
+    return reconstruct_profile(
+        mu_like_str=user.mu_like,
+        mu_regret_str=user.mu_regret,
+        n_pos=user.n_pos or 0,
+        n_neg=user.n_neg or 0,
+        scaler_mean=s_mean,
+        scaler_std=s_std
+    )
+
+def save_user_profile(db: Session, user: User, profile: dict):
+    """업데이트된 프로필 정보를 User DB 컬럼에 영구 저장"""
+    # numpy array -> list -> json string 변환
+    user.mu_like = json.dumps(profile["mu_like"].tolist())
+    user.mu_regret = json.dumps(profile["mu_regret"].tolist())
+    user.n_pos = int(profile["n_pos"])
+    user.n_neg = int(profile["n_neg"])
+    db.commit()
+
 def clean_persona_code(user):
     """프로젝트 표준 순서(1:D/N, 2:S/A, 3:M/T)에 맞춰 페르소나 코드 정렬"""
     raw = getattr(user, 'persona_type', "DSM")
@@ -122,7 +156,15 @@ def parse_and_save_product(db: Session, url: str, user: User, user_product_id: i
 
         # 분석
         risk_res = analyze_product_risk(result, model_ready_code)
-        pref_out = infer_all(item_json=result, persona_type=model_ready_code, prior_dir=PRIOR_MODEL_DIR)
+        
+        # 🚩 [추가] DB에서 유저 프로필 로드하여 실시간 개인화 반영
+        profile = load_user_profile(user)
+        pref_out = infer_all(
+            item_json=result, 
+            persona_type=model_ready_code, 
+            prior_dir=PRIOR_MODEL_DIR,
+            profile=profile
+        )
         impulse_score = int(risk_res.get('total_score', 0))
         total_pref_score = int(pref_out['total_score'])
 
@@ -217,7 +259,12 @@ def parse_and_save_product(db: Session, url: str, user: User, user_product_id: i
             "user_context": {"persona_type": user_persona_code, "target_style": getattr(user, 'chu_gu_me', '심플'), "n_effective": pref_out["n_effective"]},
             "analysis_result": {"total_prefer_score": total_pref_score, "impulse_score": impulse_score, "alpha_value": pref_out["alpha"]},
             "prior_analysis": {"score": pref_out["prior_score"], "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["prior_reason_top2"]]},
-            "personal_analysis": {"score": pref_out["personal_score"], "reason_type": pref_out["personal_reason_type"], "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["personal_reason_top2"]]},
+            "personal_analysis": {
+                "score": pref_out["personal_score"], 
+                "reason_type": pref_out["personal_reason_type"], 
+                "n_effective": pref_out["n_effective"],
+                "top_reasons": [{"feature": r[0], "value": feature_values.get(r[0])} for r in pref_out["personal_reason_top2"]]
+            },
             "impulse_block": {"score": impulse_score, "label": risk_res["risk_label"], "level": risk_res["risk_level"], "top_causes": [{"name": c["feature_name"], "value": feature_values.get(c["feature_key"]), "detail": c["detail"]} for c in risk_res["top_2_causes"]]}
         }
         print_analysis_report(user.user_id, user_persona_code, product.product_name, pref_out, risk_res, prompt_data)
@@ -313,6 +360,7 @@ async def init_chat_session(
             "timestamp": datetime.now().isoformat()
         },
         "user_context": {
+            "user_id": user_id,
             "persona_type": record.user_type,
             "frequent_malls": json.loads(user.favorite_shops) if user.favorite_shops and user.favorite_shops.startswith("[") else ([user.favorite_shops] if user.favorite_shops else []),
             "target_style": getattr(user, 'chu_gu_me', '심플')
@@ -470,6 +518,7 @@ async def handle_message(
     is_exit = (next_step == "EXIT") or (next_step == 2)
     if decision_code:
         logger.info(f"🎯 [DECISION CODE]: {decision_code}")
+
     if is_exit:
         logger.info(f"🏁 [service] 대화 종료 감지 (user_product_id={user_product_id})")
 
