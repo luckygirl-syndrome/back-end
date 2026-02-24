@@ -45,7 +45,7 @@ class UserProduct(Base):
     duration_ms = Column(Integer)
     status = Column(String(50))
     user_type = Column(String(50))
-    risk_score_1 = Column(Integer)
+    impulse_score = Column(Integer)
     risk_score_2 = Column(Integer)
     preference_score = Column(Integer, default=50)
     is_purchased = Column(TINYINT(1))
