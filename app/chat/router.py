@@ -157,6 +157,7 @@ async def get_chat_room_detail(
     """
     # 서비스 레이어 호출
     detail = service.get_chat_messages(db, user_product_id, current_user.user_id)
+    return detail
     
     if not detail:
         raise HTTPException(status_code=404, detail="채팅방 정보를 찾을 수 없어요.")
