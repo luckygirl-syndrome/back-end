@@ -1,7 +1,7 @@
 import redis
 from contextlib import asynccontextmanager
-
 from fastapi import FastAPI, Depends, HTTPException
+
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.core.config import settings
@@ -64,6 +64,20 @@ app.include_router(chat_router.router)
 app.include_router(after_chat_router)
 app.include_router(home_router.router)
 
+import logging
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled Exception at {request.url}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"message": "Internal Server Error"},
+    )
 
 @app.get("/")
 def root():
