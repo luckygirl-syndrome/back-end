@@ -22,7 +22,17 @@ from transformers import AutoTokenizer, AutoModel
 from .model_utils import KeywordAxisInfer
 import traceback
 
-# --- 3. Platform Scrapers ---
+# 🚩 [추가] selenium-wire 5.1.0은 내부적으로 desired_capabilities를 넘기려 하지만,
+# Selenium 4.10 이상에서는 이 인자가 삭제되어 TypeError가 발생합니다.
+# 이를 해결하기 위해 seleniumwire.webdriver.Remote의 __init__을 몽키패치합니다.
+from seleniumwire.webdriver import Remote as WireRemote
+_original_wire_remote_init = WireRemote.__init__
+def _patched_wire_remote_init(self, *args, **kwargs):
+    if 'desired_capabilities' in kwargs:
+        # Selenium 4.10+ 에서는 옵션 객체에 병합되어야 하므로 제거
+        del kwargs['desired_capabilities']
+    _original_wire_remote_init(self, *args, **kwargs)
+WireRemote.__init__ = _patched_wire_remote_init
 
 class MusinsaPerfectScraper:
     def __init__(self):
