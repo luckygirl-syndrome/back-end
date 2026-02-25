@@ -36,6 +36,16 @@ def _patched_remote_init(self, *args, **kwargs):
     if caps and options:
         for k, v in caps.items():
             options.set_capability(k, v)
+    elif caps and not options:
+        from selenium.webdriver.chrome.options import Options
+        options = Options()
+        for k, v in caps.items():
+            options.set_capability(k, v)
+        kwargs["options"] = options
+        
+    # Selenium Grid용 필수값 강제 적용
+    if options:
+        options.set_capability("browserName", "chrome")
             
     return _orig_remote_init(self, *args, **kwargs)
 selenium.webdriver.remote.webdriver.WebDriver.__init__ = _patched_remote_init
