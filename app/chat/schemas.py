@@ -15,7 +15,7 @@ class ChatReply(BaseModel):
     user_product_id: int
     reply: str
     is_exit: Optional[bool] = False
-    decision_code: Optional[str] = None
+    final_score: Optional[int] = None
 
 
 class ChatMessageResponse(BaseModel):
