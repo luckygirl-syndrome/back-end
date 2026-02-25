@@ -50,6 +50,7 @@ class ChatRoomDetailResponse(BaseModel):
     price: int
     platform: Optional[str] = None  # 무신사, 지그재그, 에이블리 등
     status_label: str
+    status: Optional[str] = None  # ANALYZING, PENDING, FINISHED 등 (exit 후 FINISHED → 종료 배너)
     messages: List[ChatMessageResponse]
 
     class Config:
