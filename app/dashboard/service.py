@@ -2,7 +2,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
 
-from app.chat.models import Chat
 from app.users.models import User
 from app.products.models import UserProduct, Product
 from app.dashboard import schemas
@@ -25,15 +24,15 @@ def get_home_dashboard(db: Session, user_id: int) -> schemas.HomeDashboardRespon
     
     saved_amount = sum(item[0] for item in saved_items if item[0] is not None)
 
-    # 최근 3개월 (90일) 대화 수
-    three_months_ago = datetime.now() - timedelta(days=90)
-    recent_chat_count = db.query(Chat).filter(
-        Chat.user_id == user_id,
-        Chat.created_at >= three_months_ago
-    ).count()
+    # 지금까지 나눈 대화 = 채팅방(상품) 수 (UserProduct 건수)
+    total_chat_count = db.query(UserProduct).filter(UserProduct.user_id == user_id).count()
 
-    # 전체 대화 수
-    total_chat_count = db.query(Chat).filter(Chat.user_id == user_id).count()
+    # 지난 3달 동안 나눈 대화 = 최근 3개월 이내 시작한 채팅방 수
+    three_months_ago = datetime.now() - timedelta(days=90)
+    recent_chat_count = db.query(UserProduct).filter(
+        UserProduct.user_id == user_id,
+        UserProduct.requested_at >= three_months_ago
+    ).count()
 
     data = schemas.HomeDashboardData(
         user_name=user_name,
