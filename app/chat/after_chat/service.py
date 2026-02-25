@@ -26,12 +26,14 @@ def update_purchase_status(db: Session, user_id: int, req: schemas.PurchaseStatu
         # [구매 확정]
         up.is_purchased = 1
         up.status = "PURCHASED"  # UserProduct 내의 상태 필드 업데이트
+        up.completed_at = datetime.now()  # 결정이 난 시점 (구매 완료)
         msg = "성공적으로 구매 확정되었습니다."
         
     elif req.is_abandoned:
         # [구매 포기]
         up.is_purchased = 0
         up.status = "ABANDONED"  # "안 사기로 함" 상태 기록
+        up.completed_at = datetime.now()  # 고민을 끝낸 날 (구매 포기)
         msg = "구매 포기 처리가 완료되었습니다."
         
     else:
