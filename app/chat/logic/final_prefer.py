@@ -8,6 +8,9 @@ Original file is located at
 """
 
 import os, json
+import logging
+from typing import Dict, Any, List, Optional
+logger = logging.getLogger(__name__)
 import numpy as np
 import pandas as pd
 import joblib
@@ -39,7 +42,7 @@ COUNT_LOG_COLS = ["product_likes"]   # review_count는 utility로 쓸 거라 log
 PERSONAL_SCALE_COLS = ["discount_rate","review_score","review_count","product_likes","is_direct_shipping"]
 
 # total mix
-N0_ALPHA = 20  # alpha(n)=N0/(N0+n)
+N0_ALPHA = 5   # alpha(n)=N0/(N0+n). 줄여서 테스트 때 더 빨리 반영되게 함.
 
 # =========================
 # Utils
@@ -79,15 +82,27 @@ def normalize_item_schema(item: dict) -> dict:
     return x
 
 def format_actual_value(feat_name, actual_val):
-    # 할인율, 리뷰수, 리뷰점수만 수치 표시
-    if feat_name == 'discount_rate': 
-        return f"{int(_safe_float(actual_val))}%"
-    elif feat_name == 'review_count': 
-        return f"{int(_safe_float(actual_val))}개"
-    elif feat_name == 'review_score': 
-        return f"{_safe_float(actual_val)}점"
+    # 쇼핑몰/배송 정보 한글 매핑
+    FEATURE_KO = {
+        'discount_rate': '할인율', 'review_count': '리뷰 수', 'review_score': '평점',
+        'product_likes': '찜 수', 'free_shipping': '무료 배송', 'is_direct_shipping': '빠른 배송',
+        'sim_trend_hype': '유행/대란 키워드', 'sim_temptation': '자극적 홍보 문구',
+        'sim_fit_anxiety': '핏/체형 보정 문구', 'sim_quality_logic': '소재/퀄리티 강조',
+        'sim_bundle': '1+1/묶음 할인', 'sim_confidence': 'MD추천/보증'
+    }
     
-    # 나머지는 수치 없이 이름만 나오도록 빈 값 리턴
+    val_str = ""
+    if feat_name == 'discount_rate': 
+        val_str = f"{int(_safe_float(actual_val))}%"
+    elif feat_name == 'review_count': 
+        val_str = f"{int(_safe_float(actual_val))}개"
+    elif feat_name == 'review_score': 
+        val_str = f"{_safe_float(actual_val)}점"
+
+    if feat_name in FEATURE_KO:
+        label = FEATURE_KO[feat_name]
+        return f"{label} {val_str}".strip()
+        
     return ""
 
 # =========================
@@ -112,83 +127,132 @@ def _binarize_is_direct_shipping(v):
 
 def score_prior(item_json: dict, persona_type: str,
                prior_clf, scaler_cont, meta, ref_item, topk=2):
-    FEATURE_COLS_ = meta["FEATURE_COLS"]
-    SIM_COLS_     = meta["SIM_COLS"]
-    ALL_COLS_TRAIN= meta["ALL_COLS_TRAIN"]
-    PERSONA_COLS  = meta["PERSONA_COLS"]
-    SCALE_COLS    = meta["SCALE_COLS"]
-    PASS_COLS     = meta["PASS_COLS"]
-    MIXED_COL_ORDER = meta["MIXED_COL_ORDER"]
-    EXCLUDE_AT_INFERENCE = set(meta["EXCLUDE_AT_INFERENCE"])
+    # 0. 리턴 초기화
+    prior_score = 0
+    top2_with_data = []
 
-    item = normalize_item_schema(item_json)
-    df_item = pd.DataFrame([item])
+    try:
+        FEATURE_COLS_ = meta["FEATURE_COLS"]
+        SIM_COLS_     = meta["SIM_COLS"]
+        ALL_COLS_TRAIN= meta["ALL_COLS_TRAIN"]
+        PERSONA_COLS  = meta["PERSONA_COLS"]
+        SCALE_COLS    = meta["SCALE_COLS"]
+        PASS_COLS     = meta["PASS_COLS"]
+        EXCLUDE_AT_INFERENCE = set(meta["EXCLUDE_AT_INFERENCE"])
 
-    X_feat = _logify_counts_df(df_item[FEATURE_COLS_].copy()).iloc[0].astype(float)
-
-    # prior 전용 이진화
-    X_feat["is_direct_shipping"] = _binarize_is_direct_shipping(X_feat["is_direct_shipping"])
-    for c in SIM_COLS_:
-        X_feat[c] = float(_safe_float(X_feat[c], 0.0) >= 0.5)
-
-    disc = float(X_feat["discount_rate"])
-    item_high = float(disc >= 80)
-    item_mid  = float((disc >= 30) and (disc < 80))
-
-    # delta
-    delta = {c: float(X_feat[c]) - float(ref_item.get(c, 0.0)) for c in FEATURE_COLS_}
-    delta["discount_high_flag"] = item_high - float(ref_item.get("discount_high_flag", 0.0))
-    delta["discount_mid_flag"]  = item_mid  - float(ref_item.get("discount_mid_flag", 0.0))
-
-    # 추론 영향 0
-    for c in EXCLUDE_AT_INFERENCE:
-        if c in delta:
-            delta[c] = 0.0
-
-    # ALL_COLS_TRAIN space
-    X_row = pd.Series(0.0, index=ALL_COLS_TRAIN)
-    for c in FEATURE_COLS_:
-        if c in X_row.index:
-            X_row[c] = float(delta[c])
-    for c in ["discount_high_flag", "discount_mid_flag"]:
-        if c in X_row.index:
-            X_row[c] = float(delta[c])
-
-    # persona one-hot
-    for pc in PERSONA_COLS:
-        X_row[pc] = 0.0
-    pcol = f"p_{persona_type}"
-    if pcol not in PERSONA_COLS:
-        raise ValueError(f"persona_type '{persona_type}'가 prior 메타에 없음.")
-    X_row[pcol] = 1.0
-
-    X_df = X_row.to_frame().T
-    X_cont_z = scaler_cont.transform(X_df[SCALE_COLS].values)
-    X_pass   = X_df[PASS_COLS].values.astype(float)
-    Xz = np.concatenate([X_cont_z, X_pass], axis=1)
-
-    p = float(prior_clf.predict_proba(Xz)[0, 1])
-    prior_score_100 = int(round(p * 100))
-
-    # 이유(top3): positive only
-    w = prior_clf.coef_.reshape(-1)
-    contrib = (Xz.reshape(-1) * w)
-
-    reason_features = [c for c in FEATURE_COLS_ if c not in EXCLUDE_AT_INFERENCE]
-    feat_idx = [MIXED_COL_ORDER.index(c) for c in reason_features]
-    contrib_feat = contrib[feat_idx]
-    idx_local = np.argsort(contrib_feat)[::-1][:topk]
-
-    top2_with_actual_data = [] # 변수명도 2로 센스있게!
-    for i in idx_local:
-        feat_name = reason_features[i]
-        actual_val = item_json.get(feat_name, 0)
+        item = normalize_item_schema(item_json)
+        df_item = pd.DataFrame([item])
         
-        # 🔥 여기서 아까 만든 포맷팅 함수 사용!
-        desc = format_actual_value(feat_name, actual_val)
-        top2_with_actual_data.append((feat_name, desc))
+        # 1. 수치 데이터 전처리
+        X_feat = _logify_counts_df(df_item[FEATURE_COLS_].copy()).iloc[0].astype(float)
+        
+        # --- [NEW] persona 기반 교차항 생성 ---
+        is_M = float(str(persona_type).endswith("-M"))
+        X_feat["is_M"] = is_M
+        # M 유형일 때 리뷰/좋아요가 많으면 점수를 깎기 위해 마이너스(-) 부호 적용
+        X_feat["review_count_x_is_M"]  = -float(X_feat["review_count"])  * is_M
+        X_feat["product_likes_x_is_M"] = -float(X_feat["product_likes"]) * is_M
 
-    return prior_score_100, top2_with_actual_data
+        # prior 전용 이진화
+        X_feat["is_direct_shipping"] = _binarize_is_direct_shipping(X_feat["is_direct_shipping"])
+        for c in SIM_COLS_:
+            X_feat[c] = float(_safe_float(X_feat[c], 0.0) >= 0.5)
+
+        disc = float(X_feat["discount_rate"])
+        item_high = float(disc >= 80)
+        item_mid  = float(30 <= disc < 80)
+
+        # 2. Delta 계산 (원본 피처 + 플래그)
+        delta = {c: float(X_feat[c]) - float(ref_item.get(c, 0.0)) for c in FEATURE_COLS_}
+        delta["discount_high_flag"] = item_high - float(ref_item.get("discount_high_flag", 0.0))
+        delta["discount_mid_flag"]  = item_mid  - float(ref_item.get("discount_mid_flag", 0.0))
+        
+        # 추론 영향 0 항목 처리
+        for c in EXCLUDE_AT_INFERENCE:
+            if c in delta: delta[c] = 0.0
+
+        # 3. ALL_COLS_TRAIN space (X_row 생성 및 delta 주입)
+        X_row = pd.Series(0.0, index=ALL_COLS_TRAIN)
+        
+        for c in FEATURE_COLS_:
+            if c in X_row.index:
+                X_row[c] = float(delta[c])
+        for c in ["discount_high_flag", "discount_mid_flag"]:
+            if c in X_row.index:
+                X_row[c] = float(delta[c])
+                
+        # --- NEW: 교차항 delta 주입 ---
+        for c in ["is_M", "review_count_x_is_M", "product_likes_x_is_M"]:
+            dc = f"delta{c}"
+            if dc in X_row.index:
+                X_row[dc] = float(X_feat[c]) - float(ref_item.get(c, 0.0))
+
+        # persona one-hot
+        pcol = f"p_{persona_type}"
+        if pcol in PERSONA_COLS:
+            X_row[pcol] = 1.0
+
+        # 4. 모델 추론
+        X_df = X_row.to_frame().T
+        X_cont_z = scaler_cont.transform(X_df[SCALE_COLS].values)
+        X_pass   = X_df[PASS_COLS].values.astype(float)
+        Xz = np.concatenate([X_cont_z, X_pass], axis=1)
+
+        p = float(prior_clf.predict_proba(Xz)[0, 1])
+        prior_score = int(round(p * 100))
+
+        # 5. 이유 추출 (장점이 없으면 그나마 나은 것부터!)
+        w = prior_clf.coef_.reshape(-1)
+        contrib = (Xz.reshape(-1) * w)
+        xz_names = list(SCALE_COLS) + list(PASS_COLS)
+        
+        display_targets = ["discount_rate", "review_count", "review_score", "product_likes", 
+                           "is_direct_shipping", "sim_trend_hype", "sim_fit_anxiety"]
+        
+        reason_results = []
+        for i, name in enumerate(xz_names):
+            feat_contrib = contrib[i]
+            matched = next((t for t in display_targets if t in name), None)
+            
+            if matched and name not in EXCLUDE_AT_INFERENCE:
+                if "_x_is_" in name: continue
+                # M유형 필터만 유지
+                if is_M and matched == "review_count" and float(_safe_float(item_json.get(matched, 0))) >= 100:
+                    continue
+                
+                # 기여도(feat_contrib)를 그대로 저장 (음수여도 일단 저장)
+                reason_results.append({'name': matched, 'contrib': feat_contrib, 'raw_feat_name': name})
+
+        logger.debug(f"✅ [score_prior] Xz.shape={Xz.shape}, EXCLUDE_AT_INFERENCE={EXCLUDE_AT_INFERENCE}")
+        logger.debug(f"✅ [score_prior] Extracted Candidates: {reason_results}")
+
+        # 🚩 정렬 로직: 기여도가 높은 순서대로 (점수가 낮아도 그중 제일 높은 거 2개)
+        reason_results = sorted(reason_results, key=lambda x: x['contrib'], reverse=True)
+        
+        seen = set()
+        for res in reason_results:
+            f_name = res['name']
+            if f_name not in seen:
+                val = item_json.get(f_name, 0)
+                desc = format_actual_value(f_name, val)
+                
+                # 🚩 매핑 사전 없이 깔끔하게 이름 처리
+                if not desc:
+                    # 'sim_trend_hype' -> 'Trend Hype' 식으로 변환
+                    clean_name = f_name.replace('sim_', '').replace('_', ' ').title()
+                    desc = f"{clean_name}"
+                
+                top2_with_data.append((f_name, desc))
+                seen.add(f_name)
+            if len(top2_with_data) >= topk: break
+
+        logger.debug(f"✅ [score_prior] Final Top2 Results: {top2_with_data}")
+
+    except Exception as e:
+        import traceback
+        logger.error(f"❌ score_prior 에러: {e}\n{traceback.format_exc()}")
+
+    return prior_score, top2_with_data
 
 # =========================
 # PERSONAL (유저별 profile 상태 + 온라인 업데이트)
@@ -261,6 +325,29 @@ def init_profile_from_global_stats(d: int, scaler_mean: pd.Series, scaler_std: p
         "T": float(T),
     }
 
+def reconstruct_profile(mu_like_str: str, mu_regret_str: str, n_pos: int, n_neg: int, 
+                        scaler_mean: pd.Series, scaler_std: pd.Series, T: float = 1.0):
+    """DB에 저장된 JSON 문자열과 카운트 정보를 딕셔너리 프로필로 복원"""
+    d = len(FEATURE_COLS)
+    
+    def _to_array(s):
+        if not s: return np.zeros(d, dtype=float)
+        try:
+            val = json.loads(s) if isinstance(s, str) else s
+            return np.array(val, dtype=float)
+        except:
+            return np.zeros(d, dtype=float)
+
+    return {
+        "mu_like": _to_array(mu_like_str),
+        "mu_regret": _to_array(mu_regret_str),
+        "n_pos": int(n_pos or 0),
+        "n_neg": int(n_neg or 0),
+        "scaler_mean": scaler_mean,
+        "scaler_std": scaler_std,
+        "T": float(T),
+    }
+
 def profile_n_effective(profile) -> int:
     return int(profile.get("n_pos", 0) + profile.get("n_neg", 0))
 
@@ -315,25 +402,31 @@ def score_personal(item_json: dict, profile: dict, topk=2):
     score01 = float(sigmoid(raw))
     score100 = int(round(score01 * 100))
 
-    # 이유 추출 (platform 제외)
+    # 🚩 [NEW] 이유 추출 고도화 (prior와 동일한 방식)
+    reason_results = []
     valid_idx = [i for i, f in enumerate(FEATURE_COLS) if f != "platform"]
     
-    # 점수에 따라 긍정(pos) 또는 위험(rsk) 요인 2개 선정
-    idx_pos = sorted(valid_idx, key=lambda i: contrib[i], reverse=True)[:topk]
-    idx_rsk = sorted(valid_idx, key=lambda i: contrib[i])[:topk]
+    for i in valid_idx:
+        f_name = FEATURE_COLS[i]
+        feat_contrib = contrib[i]
+        reason_results.append({'name': f_name, 'contrib': feat_contrib})
 
-    # 🔥 실제 데이터를 매칭하는 로직 추가
-    def get_drivers_with_data(indices):
-        drivers = []
-        for i in indices:
-            f_name = FEATURE_COLS[i]
+    # 정렬: 기여도 높은 순(긍정) / 낮은 순(위험)
+    is_risk = score100 <= 60
+    reason_results = sorted(reason_results, key=lambda x: x['contrib'], reverse=not is_risk)
+    
+    top2_with_data = []
+    seen = set()
+    for res in reason_results:
+        f_name = res['name']
+        if f_name not in seen:
             val = item_json.get(f_name, 0)
-            drivers.append((f_name, format_actual_value(f_name, val)))
-        return drivers
+            desc = format_actual_value(f_name, val)
+            top2_with_data.append((f_name, desc))
+            seen.add(f_name)
+        if len(top2_with_data) >= topk: break
 
-    if score100 <= 60:
-        return score100, "risk", get_drivers_with_data(idx_rsk)
-    return score100, "positive", get_drivers_with_data(idx_pos)
+    return score100, ("risk" if is_risk else "positive"), top2_with_data
 
 
 # =========================

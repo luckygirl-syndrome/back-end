@@ -58,3 +58,10 @@ class ChugumeType(str, Enum):
 
 class ChugumeUpdate(BaseModel):
     chugume_type: ChugumeType
+
+# 6. 나의 옷장 통계 (마이페이지)
+class ClosetStatsRead(BaseModel):
+    bought_count: int
+    bought_price: int
+    dropped_count: int
+    dropped_price: int

@@ -1,7 +1,58 @@
 from pydantic import BaseModel, Field
+from typing import List, Optional
+from datetime import datetime
 
 class SurveyRequest(BaseModel):
     q1: int = Field(..., description="장바구니 기간 (1-5)", example=1)
     q2: int = Field(..., description="연락 이유 (1-4)", example=3)
     q3: int = Field(..., description="구매 확신도 (1-4)", example=2)
     qc: int = Field(..., description="핵심 매력 (1-7)", example=6)
+
+class ChatMessageRequest(BaseModel):
+    message: str = Field(..., description="유저 메시지", example="이거 사고 싶어")
+
+class ChatReply(BaseModel):
+    user_product_id: int
+    reply: str
+    is_exit: Optional[bool] = False
+    decision_code: Optional[str] = None
+
+
+class ChatMessageResponse(BaseModel):
+    # For /messages/ endpoint
+    message: str = Field(..., description="LLM 응답 메시지")
+    
+    # For /room/{id} endpoint (from origin/main)
+    role: Optional[str] = None
+    content: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class ChatListItem(BaseModel):
+    user_product_id: int
+    product_name: str
+    product_img: Optional[str]
+    price: int
+    last_chat_time: str  # "오늘", "어제" 등으로 변환해서 줄 거야
+    status_label: str    # "구매 완료", "구매 포기", "고민 중"
+    is_purchased: Optional[int]
+
+
+class ChatListResponse(BaseModel):
+    latest_chat: Optional[ChatListItem]
+    all_chats: List[ChatListItem]
+
+
+class ChatRoomDetailResponse(BaseModel):
+    user_product_id: int
+    product_name: str
+    product_img: Optional[str]
+    price: int
+    platform: Optional[str] = None  # 무신사, 지그재그, 에이블리 등
+    product_url: Optional[str] = None  # 쇼핑몰 상품 링크 (상단 shop 아이콘 하이퍼링크용)
+    status_label: str
+    status: Optional[str] = None  # ANALYZING, PENDING, FINISHED 등 (exit 후 FINISHED → 종료 배너)
+    messages: List[ChatMessageResponse]
+
+    class Config:
+        from_attributes = True

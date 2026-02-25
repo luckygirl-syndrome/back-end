@@ -1,0 +1,35 @@
+name: TTObaba Back-end CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: # 수동 실행 버튼 활성화
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Back-end Build & Deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_PORT }}
+          script: |
+            set -e # 에러 발생 시 즉시 중단
+            
+            echo "🚀 배포를 시작합니다..."
+            cd /home/ubuntu/Back-end
+            
+            echo "📦 최신 코드 가져오는 중..."
+            git pull origin main
+            
+            echo "🏗️ 도커 컨테이너 빌드 및 재실행 중..."
+            # app뿐만 아니라 연관된 서비스들도 함께 빌드하도록 수정
+            docker compose up -d --build
+            
+            echo "🧹 오래된 이미지 정리 중..."
+            docker image prune -f
+            
+            echo "✅ 배포가 성공적으로 완료되었습니다!"

@@ -8,6 +8,8 @@ from app.core.config import settings
 from fastapi.security import APIKeyHeader
 import json
 from app.core.security import create_access_token, decode_access_token
+from app.products.models import UserProduct, Product
+from sqlalchemy import func
 
 router = APIRouter(prefix="/api", tags=["유저 관리"])
 api_key_header = APIKeyHeader(name="Authorization")
@@ -115,3 +117,35 @@ def update_chugume(data: schemas.ChugumeUpdate, db: Session = Depends(get_db), c
 @router.get("/profile/chugume")
 def get_chugume(current_user: models.User = Depends(get_current_user)):
     return {"chugume_type": current_user.chu_gu_me}
+
+# 8. 나의 옷장 통계 조회
+@router.get("/profile/closet", response_model=schemas.ClosetStatsRead)
+def get_closet_stats(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # status 기준: PURCHASED = 고심 끝에 구매한 옷, ABANDONED = 아쉽지만 포기한 옷 (고민 중은 제외)
+    base = db.query(UserProduct).outerjoin(
+        Product, UserProduct.product_id == Product.product_id
+    ).filter(UserProduct.user_id == current_user.user_id)
+
+    bought = base.filter(UserProduct.status == "PURCHASED").all()
+    dropped = base.filter(UserProduct.status == "ABANDONED").all()
+
+    bought_count = len(bought)
+    bought_price = 0
+    for up in bought:
+        prod = db.query(Product).filter(Product.product_id == up.product_id).first()
+        if prod and prod.price is not None:
+            bought_price += int(prod.price)
+
+    dropped_count = len(dropped)
+    dropped_price = 0
+    for up in dropped:
+        prod = db.query(Product).filter(Product.product_id == up.product_id).first()
+        if prod and prod.price is not None:
+            dropped_price += int(prod.price)
+
+    return {
+        "bought_count": bought_count,
+        "bought_price": bought_price,
+        "dropped_count": dropped_count,
+        "dropped_price": dropped_price
+    }

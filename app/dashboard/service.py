@@ -2,7 +2,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
 
-from app.chat.models import Chat
 from app.users.models import User
 from app.products.models import UserProduct, Product
 from app.dashboard import schemas
@@ -12,7 +11,7 @@ def get_home_dashboard(db: Session, user_id: int) -> schemas.HomeDashboardRespon
     if not user:
         raise ValueError("유저를 찾을 수 없습니다.")
 
-    user_name = user.name
+    user_name = user.nickname
 
     # 절약한 금액 총합 계산 (is_purchased = 0 인 항목들의 원래 가격 합 - 실제 구현 시 price나 할인가 적용 방식 등 논의 필요)
     # 현재는 product의 price 총합으로 임시 적용
@@ -25,15 +24,19 @@ def get_home_dashboard(db: Session, user_id: int) -> schemas.HomeDashboardRespon
     
     saved_amount = sum(item[0] for item in saved_items if item[0] is not None)
 
-    # 최근 3개월 (90일) 대화 수
-    three_months_ago = datetime.now() - timedelta(days=90)
-    recent_chat_count = db.query(Chat).filter(
-        Chat.user_id == user_id,
-        Chat.created_at >= three_months_ago
-    ).count()
+    # 지금까지 나눈 대화 = 채팅 목록과 동일 (상품별 1건, 분석 전 product_id=0 제외)
+    total_chat_count = db.query(UserProduct.product_id).filter(
+        UserProduct.user_id == user_id,
+        UserProduct.product_id != 0
+    ).distinct().count()
 
-    # 전체 대화 수
-    total_chat_count = db.query(Chat).filter(Chat.user_id == user_id).count()
+    # 지난 3달 동안 나눈 대화 = 최근 3개월 이내 활동한 상품 수
+    three_months_ago = datetime.now() - timedelta(days=90)
+    recent_chat_count = db.query(UserProduct.product_id).filter(
+        UserProduct.user_id == user_id,
+        UserProduct.product_id != 0,
+        UserProduct.updated_at >= three_months_ago
+    ).distinct().count()
 
     data = schemas.HomeDashboardData(
         user_name=user_name,
@@ -54,7 +57,8 @@ def get_unbought_receipts(db: Session, user_id: int) -> schemas.ReceiptListRespo
         Product, UserProduct.product_id == Product.product_id
     ).filter(
         UserProduct.user_id == user_id,
-        UserProduct.is_purchased == 0
+        UserProduct.is_purchased == 0,
+        UserProduct.status == "ABANDONED"
     ).order_by(UserProduct.completed_at.desc()).all()
 
     items = []
@@ -80,7 +84,8 @@ def get_receipt_detail(db: Session, user_id: int, user_product_id: int) -> schem
     ).filter(
         UserProduct.user_id == user_id,
         UserProduct.user_product_id == user_product_id,
-        UserProduct.is_purchased == 0
+        UserProduct.is_purchased == 0,
+        UserProduct.status == "ABANDONED"
     ).first()
 
     if not result:
@@ -115,13 +120,37 @@ def get_receipt_detail(db: Session, user_id: int, user_product_id: int) -> schem
     )
 
 def get_considering_items(db: Session, user_id: int) -> schemas.ConsideringListResponse:
-    """결정했나요? 목록 (is_purchased = NULL or pending)"""
-    results = db.query(UserProduct, Product).join(
-        Product, UserProduct.product_id == Product.product_id
-    ).filter(
-        UserProduct.user_id == user_id,
-        UserProduct.is_purchased.is_(None) # 아직 결정나지 않은 상태
-    ).order_by(UserProduct.requested_at.desc()).all()
+    """결정했나요? 목록 = 채팅에서 고민 중인 상품만, 상품별 최신 1건 (채팅 목록과 동일 방식)"""
+    subquery = (
+        db.query(
+            UserProduct.product_id,
+            func.max(UserProduct.updated_at).label("max_updated_at")
+        )
+        .filter(UserProduct.user_id == user_id)
+        .filter(UserProduct.product_id != 0)
+        .filter(UserProduct.is_purchased == 0)
+        .filter(
+            (UserProduct.status == "PENDING") | (UserProduct.status == "FINISHED") | (UserProduct.status == "ANALYZING")
+        )
+        .group_by(UserProduct.product_id)
+        .subquery()
+    )
+    results = (
+        db.query(UserProduct, Product)
+        .join(Product, UserProduct.product_id == Product.product_id)
+        .join(
+            subquery,
+            (UserProduct.product_id == subquery.c.product_id)
+            & (UserProduct.updated_at == subquery.c.max_updated_at)
+        )
+        .filter(UserProduct.user_id == user_id)
+        .filter(UserProduct.is_purchased == 0)
+        .filter(
+            (UserProduct.status == "PENDING") | (UserProduct.status == "FINISHED") | (UserProduct.status == "ANALYZING")
+        )
+        .order_by(UserProduct.updated_at.desc())
+        .all()
+    )
 
     items = []
     now = datetime.now()

@@ -7,6 +7,10 @@ from typing import Optional
 class PurchaseStatusRequest(BaseModel):
     user_product_id: int
     is_purchased: bool # True: 구매함, False: 안 샀음
+<<<<<<< HEAD
+=======
+    is_abandoned: bool = False  # 구매 포기 여부 추가
+>>>>>>> main
 
 class PurchaseStatusResponse(BaseModel):
     status: str
