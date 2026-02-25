@@ -1,23 +1,55 @@
-import os, json, re, time
+import os, json, re, time, socket
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from bs4 import BeautifulSoup
+import logging
+
+# 🚩 [추가] selenium-wire의 시끄러운 네트워크 로그(INFO)를 차단함
+logging.getLogger('seleniumwire').setLevel(logging.WARNING)
+# hpack 등의 하위 라이브러리 로그도 조용히 시킴
+logging.getLogger('hpack').setLevel(logging.WARNING)
 
 # 🚩 [수정] selenium 대신 seleniumwire를 임포트해야 프록시 옵션을 인식해!
-from seleniumwire import webdriver 
+from seleniumwire import webdriver as wire_webdriver
+from selenium import webdriver as pure_webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 from transformers import AutoTokenizer, AutoModel
 from .model_utils import KeywordAxisInfer
 import traceback
 
-# --- 3. Platform Scrapers ---
+# 🚩 [추가] selenium-wire 5.1.0은 내부적으로 desired_capabilities 등을
+# Selenium 4의 WebDriver.__init__으로 직접 넘겨서 TypeError가 발생합니다.
+# 이를 해결하기 위해 selenium 코어의 원본 __init__을 몽키패치하여 옵션에 병합시킵니다.
+import selenium.webdriver.remote.webdriver
+_orig_remote_init = selenium.webdriver.remote.webdriver.WebDriver.__init__
+def _patched_remote_init(self, *args, **kwargs):
+    caps = kwargs.pop("desired_capabilities", None)
+    kwargs.pop("browser_profile", None)
+    kwargs.pop("proxy", None)
+
+    options = kwargs.get("options")
+    if caps and options:
+        for k, v in caps.items():
+            options.set_capability(k, v)
+    elif caps and not options:
+        from selenium.webdriver.chrome.options import Options
+        options = Options()
+        for k, v in caps.items():
+            options.set_capability(k, v)
+        kwargs["options"] = options
+        
+    # Selenium Grid용 필수값 강제 적용
+    if options:
+        options.set_capability("browserName", "chrome")
+            
+    return _orig_remote_init(self, *args, **kwargs)
+selenium.webdriver.remote.webdriver.WebDriver.__init__ = _patched_remote_init
 
 class MusinsaPerfectScraper:
     def __init__(self):
@@ -27,7 +59,13 @@ class MusinsaPerfectScraper:
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+        
+        # 🚩 [추가] 이미지 로딩 차단으로 속도 최적화
+        prefs = {"profile.managed_default_content_settings.images": 2}
+        chrome_options.add_experimental_option("prefs", prefs)
+        
+        selenium_url = os.environ.get("SELENIUM_URL", "http://selenium:4444/wd/hub")
+        self.driver = pure_webdriver.Remote(command_executor=selenium_url, options=chrome_options)
 
     def run(self, url):
         # 🛡️ 1. try 문 밖에서 가장 먼저 빈 바구니를 만듭니다. (에러 방지용)
@@ -48,7 +86,7 @@ class MusinsaPerfectScraper:
 
             # 🚩 [리뷰 탈출 필살기] 화면을 중간까지 슥- 내려서 리뷰 로딩시키기
             self.driver.execute_script("window.scrollTo(0, 1500);") 
-            time.sleep(1.5) # 리뷰 데이터가 서버에서 올 시간 확보
+            time.sleep(0.5) # 1.5 -> 0.5로 단축
             
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
   
@@ -161,8 +199,15 @@ class ZigzagDetailCrawler:
         self.chrome_options.add_argument('--headless')
         self.chrome_options.add_argument('--no-sandbox')
         self.chrome_options.add_argument('--disable-dev-shm-usage')
+        self.chrome_options.add_argument('--disable-gpu')
         self.chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
+        
+        # 🚩 [추가] 이미지 로딩 차단
+        prefs = {"profile.managed_default_content_settings.images": 2}
+        self.chrome_options.add_experimental_option("prefs", prefs)
+        
+        selenium_url = os.environ.get("SELENIUM_URL", "http://selenium:4444/wd/hub")
+        self.driver = pure_webdriver.Remote(command_executor=selenium_url, options=self.chrome_options)
 
     def _expand_product_info(self):
         try:
@@ -170,7 +215,7 @@ class ZigzagDetailCrawler:
                 EC.presence_of_element_located((By.XPATH, "//button[contains(., '상품정보 더 보기')]"))
             )
             self.driver.execute_script("arguments[0].click();", more_button)
-            time.sleep(2)
+            time.sleep(0.5) # 2 -> 0.5로 단축
         except Exception:
             pass
 
@@ -180,7 +225,7 @@ class ZigzagDetailCrawler:
 
     def crawl_detail(self, url):
         self.driver.get(url)
-        time.sleep(3)
+        time.sleep(1) # 3 -> 1로 단축
         self._expand_product_info()
         soup = BeautifulSoup(self.driver.page_source, 'html.parser')
         data = {}
@@ -275,7 +320,13 @@ class AblyDetailCrawler:
         proxy_host = "gw.dataimpulse.com"
         proxy_port = "823"
 
+        try:
+            host_ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            host_ip = "127.0.0.1"
+
         proxy_options = {
+            'addr': host_ip,
             'proxy': {
                 'http': f'http://{proxy_id}:{proxy_pw}@{proxy_host}:{proxy_port}',
                 'https': f'http://{proxy_id}:{proxy_pw}@{proxy_host}:{proxy_port}',
@@ -298,9 +349,10 @@ class AblyDetailCrawler:
         self.chrome_options.add_experimental_option('useAutomationExtension', False)
         self.chrome_options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
 
-        # 🚩 [수정 포인트] seleniumwire_options만 추가!
-        self.driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), 
+        # 🚩 [수정 포인트] 에이블리만 selenium-wire 객체를 사용합니다.
+        selenium_url = os.environ.get("SELENIUM_URL", "http://selenium:4444/wd/hub")
+        self.driver = wire_webdriver.Remote(
+            command_executor=selenium_url, 
             options=self.chrome_options,
             seleniumwire_options=proxy_options # 프록시 주입
         )
@@ -326,11 +378,11 @@ class AblyDetailCrawler:
             # 🚀 [핵심] 3단계 스크롤 로직 (리뷰/찜수가 로딩될 기회를 줌)
             for offset in [800, 1600]: 
                 self.driver.execute_script(f"window.scrollTo(0, {offset});")
-                time.sleep(1.5) # 각 스크롤 후 로딩 대기
-
+                time.sleep(0.5) # 1.5 -> 0.5로 단축
+            
             # 다시 맨 위로 살짝 올려서 상단 정보도 놓치지 않게 함
             self.driver.execute_script("window.scrollTo(0, 500);")
-            time.sleep(1)
+            time.sleep(0.2) # 1.0 -> 0.2로 단축
 
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
 
