@@ -120,14 +120,37 @@ def get_receipt_detail(db: Session, user_id: int, user_product_id: int) -> schem
     )
 
 def get_considering_items(db: Session, user_id: int) -> schemas.ConsideringListResponse:
-    """결정했나요? 목록 (is_purchased = NULL or pending)"""
-    results = db.query(UserProduct, Product).join(
-        Product, UserProduct.product_id == Product.product_id
-    ).filter(
-        UserProduct.user_id == user_id,
-        UserProduct.is_purchased == 0,
-        (UserProduct.status == "PENDING") | (UserProduct.status == "FINISHED") | (UserProduct.status == "ANALYZING")
-    ).order_by(UserProduct.requested_at.desc()).all()
+    """결정했나요? 목록 = 채팅에서 고민 중인 상품만, 상품별 최신 1건 (채팅 목록과 동일 방식)"""
+    subquery = (
+        db.query(
+            UserProduct.product_id,
+            func.max(UserProduct.updated_at).label("max_updated_at")
+        )
+        .filter(UserProduct.user_id == user_id)
+        .filter(UserProduct.product_id != 0)
+        .filter(UserProduct.is_purchased == 0)
+        .filter(
+            (UserProduct.status == "PENDING") | (UserProduct.status == "FINISHED") | (UserProduct.status == "ANALYZING")
+        )
+        .group_by(UserProduct.product_id)
+        .subquery()
+    )
+    results = (
+        db.query(UserProduct, Product)
+        .join(Product, UserProduct.product_id == Product.product_id)
+        .join(
+            subquery,
+            (UserProduct.product_id == subquery.c.product_id)
+            & (UserProduct.updated_at == subquery.c.max_updated_at)
+        )
+        .filter(UserProduct.user_id == user_id)
+        .filter(UserProduct.is_purchased == 0)
+        .filter(
+            (UserProduct.status == "PENDING") | (UserProduct.status == "FINISHED") | (UserProduct.status == "ANALYZING")
+        )
+        .order_by(UserProduct.updated_at.desc())
+        .all()
+    )
 
     items = []
     now = datetime.now()
