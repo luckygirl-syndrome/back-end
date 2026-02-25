@@ -19,15 +19,35 @@ def update_purchase_status(db: Session, user_id: int, req: schemas.PurchaseStatu
     ).first()
 
     if not up:
-        raise ValueError("해당 상품을 찾을 수 없습니다.")
+        raise ValueError("해당 채팅방(상품)을 찾을 수 없습니다.")
 
-    # 구매 상태 업데이트
-    up.is_purchased = 1 if req.is_purchased else 0
+    # 2. 의사결정에 따른 상태값 분기
+    if req.is_purchased:
+        # [구매 확정]
+        up.is_purchased = 1
+        up.status = "PURCHASED"  # UserProduct 내의 상태 필드 업데이트
+        msg = "성공적으로 구매 확정되었습니다."
+        
+    elif req.is_abandoned:
+        # [구매 포기]
+        up.is_purchased = 0
+        up.status = "ABANDONED"  # "안 사기로 함" 상태 기록
+        msg = "구매 포기 처리가 완료되었습니다."
+        
+    else:
+        # 결정되지 않은 상태로 호출된 경우
+        return schemas.PurchaseStatusResponse(
+            status="success", 
+            message="변경된 결정 사항이 없습니다."
+        )
+
+    # 3. DB 반영
     db.commit()
+    db.refresh(up) # 변경된 값 확정
 
     return schemas.PurchaseStatusResponse(
         status="success",
-        message="구매 여부가 성공적으로 업데이트 되었습니다."
+        message=msg
     )
 
 def submit_feedback(db: Session, user_id: int, req: schemas.FeedbackSubmitRequest) -> schemas.FeedbackSubmitResponse:

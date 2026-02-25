@@ -55,7 +55,7 @@ def get_unbought_receipts(db: Session, user_id: int) -> schemas.ReceiptListRespo
     ).filter(
         UserProduct.user_id == user_id,
         UserProduct.is_purchased == 0,
-        UserProduct.status == "FINISHED"
+        UserProduct.status == "ABANDONED"
     ).order_by(UserProduct.completed_at.desc()).all()
 
     items = []
