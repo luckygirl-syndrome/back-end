@@ -22,17 +22,23 @@ from transformers import AutoTokenizer, AutoModel
 from .model_utils import KeywordAxisInfer
 import traceback
 
-# 🚩 [추가] selenium-wire 5.1.0은 내부적으로 desired_capabilities를 넘기려 하지만,
-# Selenium 4.10 이상에서는 이 인자가 삭제되어 TypeError가 발생합니다.
-# 이를 해결하기 위해 seleniumwire.webdriver.Remote의 __init__을 몽키패치합니다.
-from seleniumwire.webdriver import Remote as WireRemote
-_original_wire_remote_init = WireRemote.__init__
-def _patched_wire_remote_init(self, *args, **kwargs):
-    if 'desired_capabilities' in kwargs:
-        # Selenium 4.10+ 에서는 옵션 객체에 병합되어야 하므로 제거
-        del kwargs['desired_capabilities']
-    _original_wire_remote_init(self, *args, **kwargs)
-WireRemote.__init__ = _patched_wire_remote_init
+# 🚩 [추가] selenium-wire 5.1.0은 내부적으로 desired_capabilities 등을
+# Selenium 4의 WebDriver.__init__으로 직접 넘겨서 TypeError가 발생합니다.
+# 이를 해결하기 위해 selenium 코어의 원본 __init__을 몽키패치하여 옵션에 병합시킵니다.
+import selenium.webdriver.remote.webdriver
+_orig_remote_init = selenium.webdriver.remote.webdriver.WebDriver.__init__
+def _patched_remote_init(self, *args, **kwargs):
+    caps = kwargs.pop("desired_capabilities", None)
+    kwargs.pop("browser_profile", None)
+    kwargs.pop("proxy", None)
+
+    options = kwargs.get("options")
+    if caps and options:
+        for k, v in caps.items():
+            options.set_capability(k, v)
+            
+    return _orig_remote_init(self, *args, **kwargs)
+selenium.webdriver.remote.webdriver.WebDriver.__init__ = _patched_remote_init
 
 class MusinsaPerfectScraper:
     def __init__(self):
