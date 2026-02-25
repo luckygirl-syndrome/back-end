@@ -626,7 +626,7 @@ def get_user_chat_list(db: Session, user_id: int):
             (UserProduct.updated_at == subquery.c.max_updated_at)
         )
         .filter(UserProduct.user_id == user_id)
-        .order_by(UserProduct.updated_at.desc())
+        .order_by(UserProduct.updated_at.desc(), UserProduct.user_product_id.desc())
         .all()
     )
 

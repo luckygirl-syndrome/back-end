@@ -148,7 +148,7 @@ def get_considering_items(db: Session, user_id: int) -> schemas.ConsideringListR
         .filter(
             (UserProduct.status == "PENDING") | (UserProduct.status == "FINISHED") | (UserProduct.status == "ANALYZING")
         )
-        .order_by(UserProduct.updated_at.desc())
+        .order_by(UserProduct.updated_at.desc(), UserProduct.user_product_id.desc())
         .all()
     )
 
