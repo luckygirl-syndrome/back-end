@@ -22,7 +22,8 @@ class Product(Base):
     product_likes = Column(String(255))
     platform = Column(String(50))
     product_img = Column(Text)
-    
+    product_url = Column(String(2048), nullable=True)  # 쇼핑몰 상품 링크 (채팅방 상단 shop 아이콘용)
+
     # ✅ AI 분석용 심리 축 6개
     sim_temptation = Column(TINYINT(1))
     sim_trend_hype = Column(TINYINT(1))
@@ -53,6 +54,5 @@ class UserProduct(Base):
     # ✅ 2주 후 피드백 결과 저장용 컬럼
     feedback_text = Column(Text)
     feedback_rating = Column(Integer)
-    product_url = Column(String(2048), nullable=True)  # 쇼핑몰 상품 링크 (채팅방 상단 shop 아이콘용)
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)

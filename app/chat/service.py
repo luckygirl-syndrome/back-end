@@ -183,6 +183,7 @@ def parse_and_save_product(db: Session, url: str, user: User, user_product_id: i
                 review_count=int(result.get('review_count', 0)),
                 review_score=float(result.get('review_score', 0.0)),
                 product_likes=str(result.get('product_likes', '0')),
+                product_url=url,
                 **{col: result.get(col, 0) for col in [
                     "sim_temptation", "sim_trend_hype", "sim_fit_anxiety",
                     "sim_quality_logic", "sim_bundle", "sim_confidence"
@@ -190,6 +191,9 @@ def parse_and_save_product(db: Session, url: str, user: User, user_product_id: i
             )
             db.add(product)
             db.flush()
+        else:
+            # 기존 상품이어도 URL은 최신 입력 링크로 갱신 (shop 아이콘 링크용)
+            product.product_url = url
 
         # 유저-상품 매핑 갱신 (또는 저장)
         if user_product_id:
@@ -200,7 +204,6 @@ def parse_and_save_product(db: Session, url: str, user: User, user_product_id: i
                 user_prod.preference_score = total_pref_score
                 user_prod.status = "PENDING"
                 user_prod.is_purchased = 0
-                user_prod.product_url = url
                 db.commit()
             else:
                 user_prod = UserProduct(
@@ -734,7 +737,7 @@ def get_chat_messages(db: Session, user_product_id: int, user_id: int):
     messages = _deduplicate_first_reply_block(messages)
 
     platform = getattr(prod, "platform", None) or ""
-    product_url = getattr(user_prod, "product_url", None) or ""
+    product_url = getattr(prod, "product_url", None) or ""
     return {
         "user_product_id": user_prod.user_product_id,
         "product_name": prod.product_name or "",
