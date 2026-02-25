@@ -597,6 +597,7 @@ def get_time_display(dt: datetime) -> str:
     if not dt: return "알 수 없음"
     now = datetime.now()
     diff = now - dt
+    if diff.days < 0: return "오늘"  # 서버/클라이언트 시차로 미래 시각이면 오늘로
     if diff.days == 0: return "오늘"
     if diff.days == 1: return "어제"
     return f"{diff.days}일 전"
