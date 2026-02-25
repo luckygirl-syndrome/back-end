@@ -200,6 +200,7 @@ def parse_and_save_product(db: Session, url: str, user: User, user_product_id: i
                 user_prod.preference_score = total_pref_score
                 user_prod.status = "PENDING"
                 user_prod.is_purchased = 0
+                user_prod.product_url = url
                 db.commit()
             else:
                 user_prod = UserProduct(
@@ -522,6 +523,9 @@ async def handle_message(
     save_chat_message(db, user_id, user_product_id, "assistant", clean_text)
 
     is_exit = (next_step == "EXIT") or (next_step == 2)
+    if not is_exit and clean_text and "또바바의 쇼핑 진단" in clean_text:
+        is_exit = True
+        logger.info("🏁 [service] LLM이 [EXIT] 없이 쇼핑 진단 문구 반환 → exit 처리")
     if decision_code:
         logger.info(f"🎯 [DECISION CODE]: {decision_code}")
 
@@ -730,12 +734,14 @@ def get_chat_messages(db: Session, user_product_id: int, user_id: int):
     messages = _deduplicate_first_reply_block(messages)
 
     platform = getattr(prod, "platform", None) or ""
+    product_url = getattr(user_prod, "product_url", None) or ""
     return {
         "user_product_id": user_prod.user_product_id,
         "product_name": prod.product_name or "",
         "product_img": prod.product_img,
         "price": prod.price,
         "platform": platform,
+        "product_url": product_url,
         "status_label": get_status_label(user_prod.status, user_prod.is_purchased),
         "status": user_prod.status or "",  # ANALYZING, PENDING, FINISHED 등 (종료 배너 표시용)
         "messages": messages
