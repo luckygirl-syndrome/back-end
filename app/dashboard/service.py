@@ -13,13 +13,14 @@ def get_home_dashboard(db: Session, user_id: int) -> schemas.HomeDashboardRespon
 
     user_name = user.nickname
 
-    # 절약한 금액 총합 계산 (is_purchased = 0 인 항목들의 원래 가격 합 - 실제 구현 시 price나 할인가 적용 방식 등 논의 필요)
-    # 현재는 product의 price 총합으로 임시 적용
+    # 절약한 금액 총합 계산
+    # ✅ 기준 통일: "아쉽지만 포기한 옷" (status = ABANDONED) 의 상품 가격 합
     saved_items = db.query(Product.price).join(
         UserProduct, UserProduct.product_id == Product.product_id
     ).filter(
         UserProduct.user_id == user_id,
-        UserProduct.is_purchased == 0
+        UserProduct.is_purchased == 0,
+        UserProduct.status == "ABANDONED"
     ).all()
     
     saved_amount = sum(item[0] for item in saved_items if item[0] is not None)
