@@ -1,4 +1,4 @@
-import os, json, re, time
+import os, json, re, time, socket
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,7 +18,6 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 from transformers import AutoTokenizer, AutoModel
 from .model_utils import KeywordAxisInfer
 import traceback
@@ -38,7 +37,8 @@ class MusinsaPerfectScraper:
         prefs = {"profile.managed_default_content_settings.images": 2}
         chrome_options.add_experimental_option("prefs", prefs)
         
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+        selenium_url = os.environ.get("SELENIUM_URL", "http://selenium:4444/wd/hub")
+        self.driver = webdriver.Remote(command_executor=selenium_url, options=chrome_options)
 
     def run(self, url):
         # 🛡️ 1. try 문 밖에서 가장 먼저 빈 바구니를 만듭니다. (에러 방지용)
@@ -179,7 +179,8 @@ class ZigzagDetailCrawler:
         prefs = {"profile.managed_default_content_settings.images": 2}
         self.chrome_options.add_experimental_option("prefs", prefs)
         
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
+        selenium_url = os.environ.get("SELENIUM_URL", "http://selenium:4444/wd/hub")
+        self.driver = webdriver.Remote(command_executor=selenium_url, options=self.chrome_options)
 
     def _expand_product_info(self):
         try:
@@ -292,7 +293,13 @@ class AblyDetailCrawler:
         proxy_host = "gw.dataimpulse.com"
         proxy_port = "823"
 
+        try:
+            host_ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            host_ip = "127.0.0.1"
+
         proxy_options = {
+            'addr': host_ip,
             'proxy': {
                 'http': f'http://{proxy_id}:{proxy_pw}@{proxy_host}:{proxy_port}',
                 'https': f'http://{proxy_id}:{proxy_pw}@{proxy_host}:{proxy_port}',
@@ -316,8 +323,9 @@ class AblyDetailCrawler:
         self.chrome_options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
 
         # 🚩 [수정 포인트] seleniumwire_options만 추가!
-        self.driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), 
+        selenium_url = os.environ.get("SELENIUM_URL", "http://selenium:4444/wd/hub")
+        self.driver = webdriver.Remote(
+            command_executor=selenium_url, 
             options=self.chrome_options,
             seleniumwire_options=proxy_options # 프록시 주입
         )
