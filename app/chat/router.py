@@ -219,16 +219,20 @@ async def exit_chat(
         raise HTTPException(status_code=404, detail="요청한 채팅 방을 찾을 수 없어요.")
         
     # LLM 측에도 유저가 [EXIT]을 보냈음을 알려주어 히스토리에 기록 및 마지막 대응을 하게 함
-    final_reply = "채팅이 종료되었습니다."
-    decision_code = None
-    is_exit = True
+    result = {
+        "message": "채팅이 종료되었습니다.",
+        "is_exit": True,
+        "final_score": None
+    }
     
     try:
-        result = await service.handle_message(
+        llm_result = await service.handle_message(
             db=db,
+            user_id=current_user.user_id,
             user_product_id=user_product_id,
             user_input="[EXIT]"
         )
+        result.update(llm_result)
     except Exception as e:
         print(f"Warning: Failed to send [EXIT] to LLM: {str(e)}")
         
@@ -236,7 +240,7 @@ async def exit_chat(
         user_product_id=user_product_id,
         reply=result["message"],
         is_exit=result.get("is_exit", False),
-        decision_code=result.get("decision_code")
+        final_score=result.get("final_score")
     )
 
 
@@ -262,5 +266,5 @@ async def send_message(
         user_product_id=user_product_id,
         reply=result["message"],
         is_exit=result.get("is_exit", False),
-        decision_code=result.get("decision_code")
+        final_score=result.get("final_score")
     )
