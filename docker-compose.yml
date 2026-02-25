@@ -12,9 +12,12 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      SELENIUM_URL: http://selenium:4444/wd/hub
     depends_on:
       redis:
         condition: service_healthy
+      selenium:
+        condition: service_started
     deploy:
       resources:
         reservations:
@@ -31,6 +34,16 @@ services:
     restart: unless-stopped
     networks:
       - ttobaba-network
+
+  selenium:
+    image: selenium/standalone-chrome:latest
+    container_name: ttobaba-selenium
+    shm_size: 2gb
+    ports:
+      - "4444:4444"
+    networks:
+      - ttobaba-network
+    restart: unless-stopped
 
   redis:
     image: redis:7.2-alpine
