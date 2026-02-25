@@ -314,7 +314,7 @@ async def init_chat_session(
     user = db.query(User).filter(User.user_id == user_id).first()
 
     if not record or not product or not user:
-        return "데이터를 불러오는 데 실패했어. 다시 시도해줄래? 🧐"
+        return FIRST_REPLY_ERROR_MSG
 
     # ── Redis에서 분석 상세 데이터 가져오기 ──
     cache_key = f"chat:{user_product_id}:item_json"
@@ -465,11 +465,13 @@ async def init_chat_session(
 # ──────────────────────────────────────────────
 async def handle_message(
     db: Session,
+    user_id: int,
     user_product_id: int,
     user_input: str,
 ) -> dict:
     """
     유저 메시지 수신 → 세션 로드 → 프롬프트 조립 → Gemini 호출 → 히스토리 저장.
+    DB/Redis(chat_messages)에도 저장해 GET /room 시 전체 로그가 유지되도록 함.
     Returns: {"message": str, "is_exit": bool, "decision_code": str|None}
     """
     # ── 세션 데이터 로드 (MGET) ──
@@ -514,6 +516,10 @@ async def handle_message(
     # ── 히스토리 저장 (비동기) ──
     await repository.push_history(user_product_id, "user", user_input)
     await repository.push_history(user_product_id, "assistant", clean_text)
+
+    # ── GET /room에서 읽는 chat_messages Redis + DB에도 저장 (채팅 로그 유지) ──
+    save_chat_message(db, user_id, user_product_id, "user", user_input)
+    save_chat_message(db, user_id, user_product_id, "assistant", clean_text)
 
     is_exit = (next_step == "EXIT") or (next_step == 2)
     if decision_code:
@@ -721,11 +727,13 @@ def get_chat_messages(db: Session, user_product_id: int, user_id: int):
         if messages:
             redis_client.expire(cache_key, 3600)
 
+    platform = getattr(prod, "platform", None) or ""
     return {
-        "user_product_id": user_prod.user_product_id, 
-        "product_name": prod.product_name,
+        "user_product_id": user_prod.user_product_id,
+        "product_name": prod.product_name or "",
         "product_img": prod.product_img,
         "price": prod.price,
+        "platform": platform,
         "status_label": get_status_label(user_prod.status, user_prod.is_purchased),
         "messages": messages
     }
@@ -758,6 +766,109 @@ def create_initial_user_product(db: Session, user_id: int, user_persona_code: st
     db.commit()
     db.refresh(user_prod)
     return user_prod
+
+# 앱이 "첫 리플라이 재생성" 폴링 시 비교하는 에러 문구 (init_chat_session이 크롤링 미완 시 반환)
+FIRST_REPLY_ERROR_MSG = "데이터를 불러오는 데 실패했어. 다시 시도해줄래? 🧐"
+
+
+def save_survey_answers_redis(user_product_id: int, user_answers: dict):
+    """설문 답변을 Redis에 저장. refresh_first_reply 폴링 시 사용 (1시간 만료)."""
+    key = f"chat:{user_product_id}:survey_answers"
+    redis_client.setex(key, 3600, json.dumps(user_answers, ensure_ascii=False))
+
+
+def room_has_chat_messages(db: Session, user_product_id: int, user_id: int) -> bool:
+    """이 방에 이미 채팅 메시지(설문 저장 포함)가 있는지. 있으면 True(재호출=갱신만)."""
+    return (
+        db.query(Chat)
+        .filter(
+            Chat.user_product_id == user_product_id,
+            Chat.user_id == user_id,
+        )
+        .limit(1)
+        .first()
+        is not None
+    )
+
+
+def replace_last_assistant_message(db: Session, user_product_id: int, user_id: int, new_content: str) -> bool:
+    """마지막 assistant 메시지가 에러 문구일 때만 새 내용으로 교체. 중복 에러 메시지는 삭제하고 성공한 1개만 유지."""
+    # 설문(질문 4 + 답 4) 다음의 "첫 리플라이" 구간에서 에러 메시지 중복 제거, 마지막 1개만 성공 문구로 유지
+    all_assistant_after_survey = (
+        db.query(Chat)
+        .filter(
+            Chat.user_product_id == user_product_id,
+            Chat.user_id == user_id,
+            Chat.role == "assistant",
+        )
+        .order_by(Chat.chat_id.asc())
+        .all()
+    )
+    # assistant만 보면 앞 4개는 설문 질문, 그 다음부터가 첫 리플라이 후보
+    first_reply_candidates = all_assistant_after_survey[4:]
+    if not first_reply_candidates:
+        return False
+    # 에러 문구인 것들 중 마지막 하나만 남기고 나머지 삭제 후, 그 하나를 new_content로 교체
+    error_ids = [c.chat_id for c in first_reply_candidates if c.content == FIRST_REPLY_ERROR_MSG]
+    if not error_ids:
+        # 전부 에러가 아니면 마지막 것만 교체 (이미 성공이 있을 수 있음)
+        last_one = first_reply_candidates[-1]
+        if last_one.content == FIRST_REPLY_ERROR_MSG:
+            last_one.content = new_content
+            db.commit()
+            cache_key = f"chat_messages:{user_product_id}"
+            redis_client.delete(cache_key)
+            return True
+        return False
+    # 마지막 에러 메시지 1개만 남기고 나머지 에러 메시지 삭제
+    to_keep = error_ids[-1]
+    for cid in error_ids[:-1]:
+        db.query(Chat).filter(Chat.chat_id == cid).delete(synchronize_session=False)
+    last_assistant = db.query(Chat).filter(Chat.chat_id == to_keep).first()
+    if last_assistant:
+        last_assistant.content = new_content
+    db.commit()
+    cache_key = f"chat_messages:{user_product_id}"
+    redis_client.delete(cache_key)
+    return True
+
+
+async def refresh_first_reply(
+    db: Session, user_id: int, user_product_id: int
+) -> Tuple[bool, Optional[str]]:
+    """
+    분석이 나중에 완료됐을 때 첫 리플라이를 다시 생성해 DB/캐시를 갱신.
+    Redis에 저장된 설문 답변으로 init_chat_session을 다시 호출하고,
+    에러가 아니면 마지막 assistant 메시지를 실제 분석으로 교체.
+    반환: (updated, reply) — updated=True면 reply에 새 첫 리플라이.
+    """
+    key = f"chat:{user_product_id}:survey_answers"
+    raw = redis_client.get(key)
+    if not raw:
+        return False, None
+    try:
+        user_answers = json.loads(raw)
+    except Exception:
+        return False, None
+    user_prod = (
+        db.query(UserProduct)
+        .filter(UserProduct.user_product_id == user_product_id, UserProduct.user_id == user_id)
+        .first()
+    )
+    if not user_prod:
+        return False, None
+    first_response = await init_chat_session(
+        db=db,
+        user_id=user_id,
+        product_id=user_prod.product_id,
+        user_product_id=user_product_id,
+        user_answers=user_answers,
+    )
+    if first_response == FIRST_REPLY_ERROR_MSG or not first_response:
+        return False, None
+    ok = replace_last_assistant_message(db, user_product_id, user_id, first_response)
+    return ok, first_response
+
 
 def finalize_chat_survey(db: Session, user_id: int, user_product_id: int, user_answers: dict, first_response: str):
     """설문 완료 시 질문/답변 및 AI 첫 응답 저장"""

@@ -48,6 +48,7 @@ class ChatRoomDetailResponse(BaseModel):
     product_name: str
     product_img: Optional[str]
     price: int
+    platform: Optional[str] = None  # 무신사, 지그재그, 에이블리 등
     status_label: str
     messages: List[ChatMessageResponse]
 

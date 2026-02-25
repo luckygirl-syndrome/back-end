@@ -111,7 +111,17 @@ async def finalize_survey(
         user_answers=user_answers,
     )
 
-    # 추가적인 DB 저장 로직 (메인 브랜치에서 넘어온 것)은 init_chat_session 안으로 병합되었거나 추후 대응
+    # 이미 한 번이라도 설문 저장된 방이면 "재호출(폴링)" → 메시지 중복 저장 없이 첫 리플라이만 갱신 후 반환
+    already_finalized = service.room_has_chat_messages(db, user_product_id, current_user.user_id)
+    if already_finalized:
+        if first_response != service.FIRST_REPLY_ERROR_MSG:
+            service.replace_last_assistant_message(
+                db, user_product_id, current_user.user_id, first_response
+            )
+        service.save_survey_answers_redis(user_product_id, user_answers)
+        return schemas.ChatReply(user_product_id=user_product_id, reply=first_response)
+
+    # 최초 1회: 설문 Q/A + 첫 응답 DB/Redis 저장
     service.finalize_chat_survey(
         db=db,
         user_id=current_user.user_id,
@@ -119,6 +129,7 @@ async def finalize_survey(
         user_answers=user_answers,
         first_response=first_response
     )
+    service.save_survey_answers_redis(user_product_id, user_answers)
 
     return schemas.ChatReply(user_product_id=user_product_id, reply=first_response)
 
@@ -137,6 +148,26 @@ async def get_chat_list(
     current_user: User = Depends(get_current_user)
 ):
     return service.get_user_chat_list(db, current_user.user_id)
+
+@router.post(
+    "/room/{user_product_id}/refresh-first-reply",
+    summary="첫 리플라이 재생성 (분석 지연 시 폴링용)",
+    description="""
+    설문 제출 시 크롤링이 안 끝나 에러 문구가 저장된 경우,
+    앱이 5초마다 이 API를 호출해 분석이 준비되면 첫 리플라이를 다시 생성하고
+    DB/Redis를 갱신합니다. updated=true이면 GET /room으로 갱신된 메시지를 받을 수 있습니다.
+    """,
+)
+async def refresh_first_reply(
+    user_product_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    updated, reply = await service.refresh_first_reply(
+        db=db, user_id=current_user.user_id, user_product_id=user_product_id
+    )
+    return {"updated": updated, "reply": reply}
+
 
 @router.get(
     "/room/{user_product_id}", 
@@ -222,6 +253,7 @@ async def send_message(
     """유저 메시지를 받아 LLM 응답을 반환."""
     result = await service.handle_message(
         db=db,
+        user_id=current_user.user_id,
         user_product_id=user_product_id,
         user_input=request.message,
     )
