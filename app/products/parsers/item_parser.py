@@ -12,7 +12,8 @@ logging.getLogger('seleniumwire').setLevel(logging.WARNING)
 logging.getLogger('hpack').setLevel(logging.WARNING)
 
 # 🚩 [수정] selenium 대신 seleniumwire를 임포트해야 프록시 옵션을 인식해!
-from seleniumwire import webdriver 
+from seleniumwire import webdriver as wire_webdriver
+from selenium import webdriver as pure_webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -64,7 +65,7 @@ class MusinsaPerfectScraper:
         chrome_options.add_experimental_option("prefs", prefs)
         
         selenium_url = os.environ.get("SELENIUM_URL", "http://selenium:4444/wd/hub")
-        self.driver = webdriver.Remote(command_executor=selenium_url, options=chrome_options)
+        self.driver = pure_webdriver.Remote(command_executor=selenium_url, options=chrome_options)
 
     def run(self, url):
         # 🛡️ 1. try 문 밖에서 가장 먼저 빈 바구니를 만듭니다. (에러 방지용)
@@ -206,7 +207,7 @@ class ZigzagDetailCrawler:
         self.chrome_options.add_experimental_option("prefs", prefs)
         
         selenium_url = os.environ.get("SELENIUM_URL", "http://selenium:4444/wd/hub")
-        self.driver = webdriver.Remote(command_executor=selenium_url, options=self.chrome_options)
+        self.driver = pure_webdriver.Remote(command_executor=selenium_url, options=self.chrome_options)
 
     def _expand_product_info(self):
         try:
@@ -348,9 +349,9 @@ class AblyDetailCrawler:
         self.chrome_options.add_experimental_option('useAutomationExtension', False)
         self.chrome_options.add_argument("user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
 
-        # 🚩 [수정 포인트] seleniumwire_options만 추가!
+        # 🚩 [수정 포인트] 에이블리만 selenium-wire 객체를 사용합니다.
         selenium_url = os.environ.get("SELENIUM_URL", "http://selenium:4444/wd/hub")
-        self.driver = webdriver.Remote(
+        self.driver = wire_webdriver.Remote(
             command_executor=selenium_url, 
             options=self.chrome_options,
             seleniumwire_options=proxy_options # 프록시 주입
