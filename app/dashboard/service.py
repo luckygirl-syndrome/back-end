@@ -24,15 +24,17 @@ def get_home_dashboard(db: Session, user_id: int) -> schemas.HomeDashboardRespon
     
     saved_amount = sum(item[0] for item in saved_items if item[0] is not None)
 
-    # 지금까지 나눈 대화 = 채팅방(상품) 수 (UserProduct 건수)
-    total_chat_count = db.query(UserProduct).filter(UserProduct.user_id == user_id).count()
+    # 지금까지 나눈 대화 = 채팅 목록과 동일하게 상품(product) 기준 1건으로 집계 (같은 상품 여러 번 올려도 1건)
+    total_chat_count = db.query(UserProduct.product_id).filter(
+        UserProduct.user_id == user_id
+    ).distinct().count()
 
-    # 지난 3달 동안 나눈 대화 = 최근 3개월 이내 시작한 채팅방 수
+    # 지난 3달 동안 나눈 대화 = 최근 3개월 이내 활동한 상품 수 (동일 집계 방식)
     three_months_ago = datetime.now() - timedelta(days=90)
-    recent_chat_count = db.query(UserProduct).filter(
+    recent_chat_count = db.query(UserProduct.product_id).filter(
         UserProduct.user_id == user_id,
-        UserProduct.requested_at >= three_months_ago
-    ).count()
+        UserProduct.updated_at >= three_months_ago
+    ).distinct().count()
 
     data = schemas.HomeDashboardData(
         user_name=user_name,
