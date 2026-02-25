@@ -47,7 +47,7 @@ class UserProduct(Base):
     status = Column(String(50))
     user_type = Column(String(50))
     impulse_score = Column(Integer)
-    risk_score_2 = Column(Integer)
+    final_score = Column(Integer)
     preference_score = Column(Integer, default=50)
     is_purchased = Column(TINYINT(1))
     prompt_data = Column(Text)  # ✅ 챗봇에게 넘길 최종 완전체 JSON 캐싱
