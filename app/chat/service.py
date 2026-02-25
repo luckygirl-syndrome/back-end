@@ -45,6 +45,7 @@ from app.chat.logic.final_prefer import infer_all
 from app.chat.logic.impulse_calculator import analyze_product_risk
 from app.chat.logic.final_prefer import infer_all, reconstruct_profile, update_profile, load_prior_artifacts
 from app.chat.logic.user_survey import determine_mode
+from app.chat.logic.final_score import compute_final_score
 from .constants import (
     IMPULSE_GUIDE_DATA, SURVEY_TEXT_MAPPING, DEFAULT_VALUES,
     SURVEY_SCORE_TABLE, PRIOR_TEXT, PERSONAL_POS_TEXT, PERSONAL_RISK_TEXT,
@@ -445,7 +446,7 @@ async def init_chat_session(
     logger.debug(f"🚀 LLM INPUT JSON (Trace: {final_input_json['meta']['trace_id']}):\n{json.dumps(final_input_json, indent=4, ensure_ascii=False)}")
 
     # ── 첫 Gemini 호출 ──
-    first_input = "설문 완료!"
+    first_input = ""
     clean_text, next_step, is_held, decision_code = await agent.generate_response(
         json_data=final_input_json,
         current_step=1,
@@ -532,14 +533,37 @@ async def handle_message(
     if decision_code:
         logger.info(f"🎯 [DECISION CODE]: {decision_code}")
 
-    if is_exit:
-        logger.info(f"🏁 [service] 대화 종료 감지 (user_product_id={user_product_id})")
+    final_score_val = None
+    if is_exit and decision_code:
+        try:
+            impulse_score = ctx_fixed.get("impulse_block", {}).get("impulse_score", 0)
+            preference_score = ctx_fixed.get("preference_block", {}).get("total_score", 0)
+            mode = ctx_fixed.get("mode_block", {}).get("current_mode", "BRAKE")
+            
+            final_score_val = compute_final_score(
+                impulse_score=impulse_score, 
+                preference_score=preference_score, 
+                attitude_code=decision_code, 
+                mode=mode
+            )
+            
+            # Update DB with the final score
+            record = db.query(UserProduct).filter(
+                UserProduct.user_product_id == user_product_id
+            ).first()
+            if record:
+                record.final_score = final_score_val
+                db.commit()
+                
+            logger.info(f"🏁 [service] 대화 종료 감지 (user_product_id={user_product_id}), final_score={final_score_val}")
+        except Exception as e:
+            logger.error(f"Error calculating final_score: {e}")
 
     return {
         "user_product_id": user_product_id,
         "message": clean_text,
         "is_exit": is_exit,
-        "decision_code": decision_code,
+        "final_score": final_score_val
     }
 
 
