@@ -22,11 +22,11 @@ import google.generativeai as genai
 from sqlalchemy.orm import Session
 from app.chat.enum import ChatStatus
 
-def get_status_label(status: str, is_purchased: int) -> str:
+def get_status_label(status: str, is_purchased: int | None) -> str:
     """ChatStatus에 따른 한글 라벨을 반환하는 공통 함수"""
     if is_purchased == 1:
         return "구매 완료"
-    
+
     status_display_map = {
         ChatStatus.ANALYZING: "고민 중",
         ChatStatus.PENDING: "고민 중",
@@ -727,6 +727,8 @@ def get_chat_messages(db: Session, user_product_id: int, user_id: int):
         if messages:
             redis_client.expire(cache_key, 3600)
 
+    messages = _deduplicate_first_reply_block(messages)
+
     platform = getattr(prod, "platform", None) or ""
     return {
         "user_product_id": user_prod.user_product_id,
@@ -769,6 +771,22 @@ def create_initial_user_product(db: Session, user_id: int, user_persona_code: st
 
 # 앱이 "첫 리플라이 재생성" 폴링 시 비교하는 에러 문구 (init_chat_session이 크롤링 미완 시 반환)
 FIRST_REPLY_ERROR_MSG = "데이터를 불러오는 데 실패했어. 다시 시도해줄래? 🧐"
+
+SURVEY_MESSAGE_COUNT = 8  # 설문 질문 4 + 답 4
+
+
+def _deduplicate_first_reply_block(messages: list) -> list:
+    """설문(8) 다음 연속된 assistant 메시지는 마지막 1개만 남기고 제거. 실패 재시도 중복 표시 방지."""
+    if len(messages) <= SURVEY_MESSAGE_COUNT:
+        return messages
+    rest = messages[SURVEY_MESSAGE_COUNT:]
+    i = 0
+    while i < len(rest) and rest[i].get("role") == "assistant":
+        i += 1
+    if i <= 1:
+        return messages
+    last_only = rest[i - 1]
+    return messages[:SURVEY_MESSAGE_COUNT] + [last_only] + rest[i:]
 
 
 def save_survey_answers_redis(user_product_id: int, user_answers: dict):
@@ -871,7 +889,23 @@ async def refresh_first_reply(
 
 
 def finalize_chat_survey(db: Session, user_id: int, user_product_id: int, user_answers: dict, first_response: str):
-    """설문 완료 시 질문/답변 및 AI 첫 응답 저장"""
+    """설문 완료 시 질문/답변 및 AI 첫 응답 저장. 이미 설문이 있으면(레이스 등) 첫 리플라이만 추가/갱신."""
+    existing_count = (
+        db.query(Chat)
+        .filter(
+            Chat.user_product_id == user_product_id,
+            Chat.user_id == user_id,
+        )
+        .count()
+    )
+    if existing_count >= SURVEY_MESSAGE_COUNT:
+        # 설문은 이미 저장됨. 첫 리플라이만 추가 또는 마지막 assistant로 교체
+        if existing_count == SURVEY_MESSAGE_COUNT:
+            save_chat_message(db, user_id, user_product_id, "assistant", first_response)
+        else:
+            replace_last_assistant_message(db, user_product_id, user_id, first_response)
+        return True
+
     # 1. 설문 질문과 답변 저장
     survey_pairs = [
         ("이거 장바구니/찜에 담은 지 얼마나 됐어?", get_q1_text(user_answers.get('q1'))),
@@ -886,5 +920,5 @@ def finalize_chat_survey(db: Session, user_id: int, user_product_id: int, user_a
 
     # 2. AI의 첫 분석 답변 저장
     save_chat_message(db, user_id, user_product_id, "assistant", first_response)
-    
+
     return True
