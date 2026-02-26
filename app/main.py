@@ -49,7 +49,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 
 origins = [
+    "https://ttobaba-d8859.web.app",
     "https://front-end-ochre-kappa.vercel.app",
+    "https://front-dmn3bfwhd-iamluckygirlsyndrome-8386s-projects.vercel.app",
 ]
 
 # CORS 설정
