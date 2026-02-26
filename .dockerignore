@@ -19,6 +19,7 @@ AI/
 Dockerfile
 docker-compose.yml
 .dockerignore
+certbot/
 
 # Redis 볼륨 데이터
 redis_data/
