@@ -48,10 +48,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 
+origins = [
+    "https://ttobaba-d8859.web.app/",
+]
+
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 테스트용으로 모두 허용, 실제 배포 시에는 프론트 주소만!
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
