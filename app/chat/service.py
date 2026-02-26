@@ -772,6 +772,7 @@ def get_chat_messages(db: Session, user_product_id: int, user_id: int):
         "product_url": product_url,
         "status_label": get_status_label(user_prod.status, user_prod.is_purchased),
         "status": user_prod.status or "",  # ANALYZING, PENDING, FINISHED 등 (종료 배너 표시용)
+        "final_score": getattr(user_prod, "final_score", None),
         "messages": messages
     }
 

@@ -52,6 +52,7 @@ class ChatRoomDetailResponse(BaseModel):
     product_url: Optional[str] = None  # 쇼핑몰 상품 링크 (상단 shop 아이콘 하이퍼링크용)
     status_label: str
     status: Optional[str] = None  # ANALYZING, PENDING, FINISHED 등 (exit 후 FINISHED → 종료 배너)
+    final_score: Optional[int] = None
     messages: List[ChatMessageResponse]
 
     class Config:
